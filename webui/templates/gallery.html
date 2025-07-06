@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SD Image Gallery</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <link rel="stylesheet" href="/static/gallery.css">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f4f4f4; }
+        .container { max-width: 1200px; margin: 2rem auto; padding: 1rem; background: #fff; border-radius: 8px; }
+        .search-bar { margin-bottom: 1.5rem; }
+        .gallery { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; }
+        .thumb { cursor: pointer; border: none; background: none; overflow: hidden; margin: 0; }
+        .thumb img { height: 150px; width: auto; display: block; }
+        .thumb .meta { display: none; }
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.7); align-items: center; justify-content: center; }
+        .modal-content { background: #fff; padding: 2em; border-radius: 8px; max-width: 700px; max-height: 90vh; overflow: auto; display: flex; gap: 1rem; }
+        .modal img { max-width: 50%; max-height: 80vh; object-fit: contain; }
+        .close { float: right; font-size: 1.5em; cursor: pointer; }
+        #modal-meta { max-width: 50%; overflow-y: auto; white-space: pre-wrap; background:#f8f8f8; padding:1em; border-radius:4px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>SD Image Gallery</h1>
+    <form class="search-bar" id="search-form" hx-get="/" hx-target=".gallery" hx-push-url="true" onsubmit="return false;">
+        <input type="text" id="search-input" name="search" value="{{ search }}" placeholder="Search metadata..." style="width: 300px; padding: 0.5em;">
+        <button type="submit" onclick="applySearch()">Search</button>
+        <button type="button" id="add-field-btn" onclick="addField()">+</button>
+        <div id="fields-container">
+            {% for i in range(logics|length) %}
+            <div class="search-field" data-field="{{ fields[i] }}">
+                <select class="logic-select" onchange="updateSearch()">
+                    <option value="AND" {% if logics[i] == 'AND' %}selected{% endif %}>AND</option>
+                    <option value="OR" {% if logics[i] == 'OR' %}selected{% endif %}>OR</option>
+                    <option value="NOT" {% if logics[i] == 'NOT' %}selected{% endif %}>NOT</option>
+                </select>
+                <input type="text" class="field-input" oninput="updateSearch()" placeholder="Enter search text" value="{{ values[i] }}">
+                <button type="button" onclick="removeField(this)">-</button>
+            </div>
+            {% endfor %}
+        </div>
+    </form>
+    <div class="gallery">
+        {% for file in files %}
+        <div class="thumb"
+             data-file-path="{{ file['file_path']|e }}"
+             data-meta='{{ file['metadata_json']|e }}'
+             data-id="{{ file['id'] }}"
+             onclick="showModal(this)">
+            <img src="/image/{{ file['id'] }}" alt="Image" onerror="this.onerror=null;this.src='/static/placeholder.png';">
+            <div class="meta">
+                <div style="font-weight:bold;">{{ file['file_path'].split('/')[-1] }}</div>
+                <div style="font-size:0.85em; color:#666;">{{ file['last_scanned'] }}</div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+<div class="modal" id="modal">
+    <div class="modal-content">
+        <span class="close" onclick="hideModal()">&times;</span>
+        <img id="modal-img" src="" alt="Image">
+        <pre id="modal-meta"></pre>
+    </div>
+</div>
+<script>
+let availableFields = [];
+let fieldsLoaded = false;
+
+async function fetchFields() {
+    if (fieldsLoaded) return;
+    try {
+        const response = await fetch('/metadata_fields');
+        if (!response.ok) {
+            console.error('Failed to fetch metadata fields:', response.statusText);
+            return;
+        }
+        availableFields = await response.json();
+        fieldsLoaded = true;
+        const addFieldBtn = document.getElementById('add-field-btn');
+        if (addFieldBtn) {
+            addFieldBtn.disabled = false;
+        } else {
+            console.error('Add Field button not found');
+        }
+    } catch (error) {
+        console.error('Error fetching metadata fields:', error);
+    }
+}
+
+function addField() {
+    const container = document.getElementById('fields-container');
+    const div = document.createElement('div');
+    div.className = 'search-field';
+
+    const logicSelect = document.createElement('select');
+    logicSelect.className = 'logic-select';
+    logicSelect.onchange = updateSearch;
+    ['AND', 'OR', 'NOT'].forEach(logic => {
+        const option = document.createElement('option');
+        option.value = logic;
+        option.textContent = logic;
+        logicSelect.appendChild(option);
+    });
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'field-input';
+    input.placeholder = 'Enter search text';
+    input.oninput = updateSearch;
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = '-';
+    button.onclick = () => {
+        div.remove();
+        updateSearch();
+    };
+
+    div.appendChild(logicSelect);
+    div.appendChild(input);
+    div.appendChild(button);
+    container.appendChild(div);
+}
+
+function removeField(button) {
+    button.parentElement.remove();
+    updateSearch();
+}
+
+function updateSearch() {
+    // Optionally, implement live search or validation here
+}
+
+function applySearch() {
+    const searchInput = document.getElementById('search-input');
+    const fieldsContainer = document.getElementById('fields-container');
+    const logics = [];
+    const values = [];
+
+    fieldsContainer.querySelectorAll('.search-field').forEach(div => {
+        const logicSelect = div.querySelector('.logic-select');
+        const input = div.querySelector('.field-input');
+        if (input.value.trim() !== '') {
+            logics.push(logicSelect.value);
+            values.push(input.value.trim());
+        }
+    });
+
+    let url = '/?';
+    if (searchInput.value.trim() !== '') {
+        url += `search=${encodeURIComponent(searchInput.value.trim())}&`;
+    }
+    logics.forEach((logic, i) => {
+        url += `logics=${encodeURIComponent(logic)}&`;
+    });
+    values.forEach((value, i) => {
+        url += `values=${encodeURIComponent(value)}&`;
+    });
+    url = url.slice(0, -1); // Remove trailing &
+
+    window.location.href = url;
+}
+
+function showModal(el) {
+    var imgPath = el.getAttribute('data-file-path');
+    var metaJson = el.getAttribute('data-meta');
+    document.getElementById('modal-img').src = "/image/" + el.getAttribute('data-id');
+    try {
+        var metaObj = JSON.parse(metaJson);
+        document.getElementById('modal-meta').textContent = JSON.stringify(metaObj, null, 2);
+    } catch (e) {
+        document.getElementById('modal-meta').textContent = metaJson;
+    }
+    document.getElementById('modal').style.display = "flex";
+}
+
+function hideModal() {
+    document.getElementById('modal').style.display = "none";
+}
+
+window.onclick = function(event) {
+    var modal = document.getElementById('modal');
+    if (event.target == modal) {
+        hideModal();
+    }
+}
+
+window.onload = () => {
+    fetchFields();
+};
+</script>
+</body>
+</html>
