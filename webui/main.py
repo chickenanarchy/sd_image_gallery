@@ -25,6 +25,8 @@ def gallery(
     search: str = "",
     logics: Optional[List[str]] = Query(default=[]),
     values: Optional[List[str]] = Query(default=[]),
+    page: int = 1,
+    page_size: int = 100,
 ) -> HTMLResponse:
     try:
         with get_db_connection() as conn:
@@ -68,12 +70,16 @@ def gallery(
                             where_statement += f" {operator} ({clause})"
                 params = clause_params.copy()
 
-                query = f"SELECT * FROM files WHERE {where_statement} ORDER BY last_scanned DESC LIMIT 100"
-                cursor.execute(query, params)
+                query = f"SELECT * FROM files WHERE {where_statement} ORDER BY last_scanned DESC LIMIT ? OFFSET ?"
+                cursor.execute(query, params + [page_size, (page - 1) * page_size])
+                files = cursor.fetchall()
+                cursor.execute(f"SELECT COUNT(*) FROM files WHERE {where_statement}", params)
+                total = cursor.fetchone()[0]
             else:
-                cursor.execute("SELECT * FROM files ORDER BY last_scanned DESC LIMIT 100")
-
-            files = cursor.fetchall()
+                cursor.execute("SELECT * FROM files ORDER BY last_scanned DESC LIMIT ? OFFSET ?", (page_size, (page - 1) * page_size))
+                files = cursor.fetchall()
+                cursor.execute("SELECT COUNT(*) FROM files")
+                total = cursor.fetchone()[0]
     except sqlite3.Error as e:
         # Log error or handle accordingly
         return templates.TemplateResponse(
@@ -86,6 +92,9 @@ def gallery(
                 "fields": values if values else [],
                 "values": values if values else [],
                 "error": "Database error occurred.",
+                "page": page,
+                "page_size": page_size,
+                "total": 0,
             },
         )
 
@@ -98,6 +107,9 @@ def gallery(
             "logics": logics if logics else [],
             "fields": values if values else [],
             "values": values if values else [],
+            "page": page,
+            "page_size": page_size,
+            "total": total,
         },
     )
 

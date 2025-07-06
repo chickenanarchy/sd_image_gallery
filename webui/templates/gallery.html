@@ -23,7 +23,7 @@
 <body>
 <div class="container">
     <h1>SD Image Gallery</h1>
-    <form class="search-bar" id="search-form" hx-get="/" hx-target=".gallery" hx-push-url="true" onsubmit="return false;">
+    <form class="search-bar" id="search-form" onsubmit="return false;">
         <input type="text" id="search-input" name="search" value="{{ search }}" placeholder="Search metadata..." style="width: 300px; padding: 0.5em;">
         <button type="submit" onclick="applySearch()">Search</button>
         <button type="button" id="add-field-btn" onclick="addField()">+</button>
@@ -55,6 +55,29 @@
             </div>
         </div>
         {% endfor %}
+    </div>
+
+    <div class="pagination" style="margin-top: 1rem; text-align: center;">
+        {% set total_pages = (total // page_size) + (1 if total % page_size > 0 else 0) %}
+        <button
+            onclick="goToPage({{ page - 1 }})"
+            {% if page <= 1 %}disabled{% endif %}
+            style="margin-right: 0.5rem;"
+        >Previous</button>
+        <span>Page {{ page }} of {{ total_pages }} ({{ total }} images)</span>
+        <button
+            onclick="goToPage({{ page + 1 }})"
+            {% if page >= total_pages %}disabled{% endif %}
+            style="margin-left: 0.5rem;"
+        >Next</button>
+        <input
+            type="number"
+            min="1"
+            max="{{ total_pages }}"
+            value="{{ page }}"
+            onchange="jumpToPage(this.value)"
+            style="width: 4rem; margin-left: 1rem;"
+        />
     </div>
 </div>
 <div class="modal" id="modal">
@@ -150,17 +173,53 @@ function applySearch() {
 
     let url = '/?';
     if (searchInput.value.trim() !== '') {
-        url += `search=${encodeURIComponent(searchInput.value.trim())}&`;
+        url += 'search=' + encodeURIComponent(searchInput.value.trim()) + '&';
     }
     logics.forEach((logic, i) => {
-        url += `logics=${encodeURIComponent(logic)}&`;
+        url += 'logics=' + encodeURIComponent(logic) + '&';
     });
     values.forEach((value, i) => {
-        url += `values=${encodeURIComponent(value)}&`;
+        url += 'values=' + encodeURIComponent(value) + '&';
     });
-    url = url.slice(0, -1); // Remove trailing &
+    // Remove trailing &
+    if (url.endsWith('&')) {
+        url = url.slice(0, -1);
+    }
+
+    // Append current page=1 when applying new search
+    url += '&page=1';
 
     window.location.href = url;
+}
+
+function goToPage(page) {
+    const urlParams = new URLSearchParams(window.location.search);
+    const search = urlParams.get('search') || '';
+    const logics = urlParams.getAll('logics');
+    const values = urlParams.getAll('values');
+    const pageSize = urlParams.get('page_size') || 100;
+
+    let url = '/?';
+    if (search.trim() !== '') {
+        url += 'search=' + encodeURIComponent(search) + '&';
+    }
+    logics.forEach(logic => {
+        url += 'logics=' + encodeURIComponent(logic) + '&';
+    });
+    values.forEach(value => {
+        url += 'values=' + encodeURIComponent(value) + '&';
+    });
+    url += 'page=' + page + '&page_size=' + pageSize;
+
+    window.location.href = url;
+}
+
+function jumpToPage(value) {
+    let page = parseInt(value);
+    if (isNaN(page) || page < 1) {
+        page = 1;
+    }
+    goToPage(page);
 }
 
 function showModal(el) {
