@@ -1,7 +1,9 @@
 import os
 import sqlite3
-from fastapi import FastAPI, Request, Query
-from fastapi.responses import HTMLResponse
+from typing import List, Optional
+
+from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -17,53 +19,76 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-from fastapi import Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
-
-from typing import List, Optional
-
 @app.get("/", response_class=HTMLResponse)
 def gallery(
     request: Request,
     search: str = "",
     logics: Optional[List[str]] = Query(default=[]),
     values: Optional[List[str]] = Query(default=[]),
-):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+) -> HTMLResponse:
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
 
-    if values:
-        # Build SQL WHERE clause with logical operators, including main search
-        where_clauses = []
-        params = []
-        if search:
-            where_clauses.append("(metadata_json LIKE ?)")
-            params.append(f"%{search}%")
-        for i, value in enumerate(values):
-            clause = "metadata_json LIKE ?"
-            if i == 0 and not search:
-                where_clauses.append(f"({clause})")
+            # Validate logics to allowed values only
+            allowed_logics = {"AND", "OR", "NOT"}
+
+            # Build list of all clauses and their operators
+            clauses = []
+            clause_params = []
+
+            # Add main search term if present (first clause, no operator)
+            if search:
+                clauses.append((None, "metadata_json LIKE ?"))
+                clause_params.append(f"%{search}%")
+
+            # Add additional values with their logical operators
+            for i, value in enumerate(values):
+                logic = "AND"  # default logic
+                if i < len(logics):
+                    candidate_logic = logics[i].upper()
+                    if candidate_logic in allowed_logics:
+                        logic = candidate_logic
+                clauses.append((logic, "metadata_json LIKE ?"))
+                clause_params.append(f"%{value}%")
+
+            # Construct the WHERE clause string
+            if clauses:
+                where_statement = ""
+                first = True
+                for operator, clause in clauses:
+                    if first:
+                        # First clause, no operator prefix
+                        where_statement += f"({clause})"
+                        first = False
+                    else:
+                        if operator == "NOT":
+                            where_statement += f" AND NOT ({clause})"
+                        else:
+                            where_statement += f" {operator} ({clause})"
+                params = clause_params.copy()
+
+                query = f"SELECT * FROM files WHERE {where_statement} ORDER BY last_scanned DESC LIMIT 100"
+                cursor.execute(query, params)
             else:
-                logic = logics[i - 1].upper() if i - 1 < len(logics) else "AND"
-                if logic == "AND":
-                    where_clauses.append(f"AND ({clause})")
-                elif logic == "OR":
-                    where_clauses.append(f"OR ({clause})")
-                elif logic == "NOT":
-                    where_clauses.append(f"AND NOT ({clause})")
-                else:
-                    where_clauses.append(f"AND ({clause})")
-            params.append(f"%{value}%")
-        where_statement = " ".join(where_clauses)
-        query = f"SELECT * FROM files WHERE {where_statement} ORDER BY last_scanned DESC LIMIT 100"
-        cursor.execute(query, params)
-    elif search:
-        cursor.execute("SELECT * FROM files WHERE metadata_json LIKE ? ORDER BY last_scanned DESC LIMIT 100", (f"%{search}%",))
-    else:
-        cursor.execute("SELECT * FROM files ORDER BY last_scanned DESC LIMIT 100")
+                cursor.execute("SELECT * FROM files ORDER BY last_scanned DESC LIMIT 100")
 
-    files = cursor.fetchall()
-    conn.close()
+            files = cursor.fetchall()
+    except sqlite3.Error as e:
+        # Log error or handle accordingly
+        return templates.TemplateResponse(
+            "gallery.html",
+            {
+                "request": request,
+                "files": [],
+                "search": search,
+                "logics": logics if logics else [],
+                "fields": values if values else [],
+                "values": values if values else [],
+                "error": "Database error occurred.",
+            },
+        )
+
     return templates.TemplateResponse(
         "gallery.html",
         {
@@ -76,21 +101,22 @@ def gallery(
         },
     )
 
-# Removed /metadata_fields endpoint as it is no longer used
-
-from fastapi.responses import FileResponse
-from fastapi import HTTPException
-
 @app.get("/image/{file_id}")
-def get_image(file_id: int):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT file_path FROM files WHERE id = ?", (file_id,))
-    row = cursor.fetchone()
-    conn.close()
+def get_image(file_id: int) -> FileResponse:
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT file_path FROM files WHERE id = ?", (file_id,))
+            row = cursor.fetchone()
+    except sqlite3.Error:
+        raise HTTPException(status_code=500, detail="Database error")
+
     if not row:
         raise HTTPException(status_code=404, detail="Image not found")
+
     file_path = row["file_path"]
     if not os.path.isfile(file_path):
+        # Log warning about missing file if needed
         raise HTTPException(status_code=404, detail="File not found on disk")
+
     return FileResponse(file_path)
