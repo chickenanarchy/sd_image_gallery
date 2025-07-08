@@ -48,6 +48,33 @@ def serialize_obj(obj):
         else:
             return str(obj)
 
+import hashlib
+import json
+import datetime
+from sd_parsers import ParserManager
+from alive_progress import alive_bar
+import os
+
+def serialize_obj(obj):
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    elif isinstance(obj, list):
+        return [serialize_obj(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {key: serialize_obj(value) for key, value in obj.items()}
+    else:
+        if hasattr(obj, "__dict__"):
+            return {key: serialize_obj(value) for key, value in obj.__dict__.items() if not key.startswith("_")}
+        else:
+            return str(obj)
+
+def scan_dir(path):
+    for entry in os.scandir(path):
+        if entry.is_dir(follow_symlinks=False):
+            yield from scan_dir(entry.path)
+        elif entry.is_file(follow_symlinks=False):
+            yield entry.path
+
 def index_files():
     parser_manager = ParserManager()
     import_path = input("Enter the root directory to scan for images: ").strip()
@@ -58,25 +85,36 @@ def index_files():
     supported_exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff'}
     files_indexed = 0
     files_skipped = 0
+    BATCH_SIZE = 1000
+    batch = []
 
     with sqlite3.connect("sd_index.db") as conn:
         cursor = conn.cursor()
-        for root, _, files in os.walk(import_path):
-            for fname in files:
-                ext = os.path.splitext(fname)[1].lower()
+        # SQLite PRAGMA tuning for bulk insert
+        cursor.execute("PRAGMA journal_mode = OFF;")
+        cursor.execute("PRAGMA synchronous = OFF;")
+        cursor.execute("PRAGMA temp_store = MEMORY;")
+
+        # Count total files for progress bar
+        total_files = 0
+        for _ in scan_dir(import_path):
+            total_files += 1
+
+        with alive_bar(total_files, title="Indexing images") as bar:
+            for fpath in scan_dir(import_path):
+                ext = os.path.splitext(fpath)[1].lower()
                 if ext not in supported_exts:
                     files_skipped += 1
+                    bar()
                     continue
-                fpath = os.path.join(root, fname)
                 try:
                     prompt_info = parser_manager.parse(fpath)
                     if not prompt_info:
                         files_skipped += 1
+                        bar()
                         continue
-                    # Serialize entire prompt_info object recursively
                     metadata_obj = serialize_obj(prompt_info)
                     metadata = json.dumps(metadata_obj)
-                    # Compute file hash (optional, for deduplication)
                     hasher = hashlib.sha256()
                     with open(fpath, "rb") as f:
                         while True:
@@ -85,20 +123,37 @@ def index_files():
                                 break
                             hasher.update(chunk)
                     file_hash = hasher.hexdigest()
-                    # Upsert into files table
-                    cursor.execute("""
-                        INSERT INTO files (file_path, file_hash, metadata_json, last_scanned)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(file_path) DO UPDATE SET
-                            file_hash=excluded.file_hash,
-                            metadata_json=excluded.metadata_json,
-                            last_scanned=excluded.last_scanned
-                    """, (fpath, file_hash, metadata, datetime.datetime.now()))
+                    batch.append((fpath, file_hash, metadata, datetime.datetime.now()))
                     files_indexed += 1
-                except Exception as e:
-                    print(f"Error processing {fpath}: {e}")
+                    if len(batch) >= BATCH_SIZE:
+                        cursor.executemany("""
+                            INSERT INTO files (file_path, file_hash, metadata_json, last_scanned)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(file_path) DO UPDATE SET
+                                file_hash=excluded.file_hash,
+                                metadata_json=excluded.metadata_json,
+                                last_scanned=excluded.last_scanned
+                        """, batch)
+                        batch.clear()
+                except Exception:
+                    # Suppress individual file errors, just count skipped
                     files_skipped += 1
+                bar()
+            if batch:
+                cursor.executemany("""
+                    INSERT INTO files (file_path, file_hash, metadata_json, last_scanned)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(file_path) DO UPDATE SET
+                        file_hash=excluded.file_hash,
+                        metadata_json=excluded.metadata_json,
+                        last_scanned=excluded.last_scanned
+                """, batch)
         conn.commit()
+        # Restore PRAGMA settings if needed (optional)
+        cursor.execute("PRAGMA journal_mode = WAL;")
+        cursor.execute("PRAGMA synchronous = NORMAL;")
+
+    print(f"Indexing complete. Files indexed: {files_indexed}, files skipped: {files_skipped}")
 
 def run_webui():
     import subprocess

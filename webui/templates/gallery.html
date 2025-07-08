@@ -27,6 +27,10 @@
         <input type="text" id="search-input" name="search" value="{{ search }}" placeholder="Search metadata..." style="width: 300px; padding: 0.5em;">
         <button type="submit" onclick="applySearch()">Search</button>
         <button type="button" id="add-field-btn" onclick="addField()">+</button>
+        <label style="margin-left: 1rem; font-weight: normal; cursor: pointer; user-select: none;">
+            <input type="checkbox" id="toggle-selection-mode" style="vertical-align: middle; margin-right: 0.3em;">
+            Enable Selection Mode
+        </label>
         <div id="fields-container">
             {% for i in range(logics|length) %}
             <div class="search-field" data-field="{{ fields[i] }}">
@@ -41,23 +45,8 @@
             {% endfor %}
         </div>
     </form>
-    <div class="gallery">
-        {% for file in files %}
-        <div class="thumb"
-             data-file-path="{{ file['file_path']|e }}"
-             data-meta='{{ file['metadata_json']|e }}'
-             data-id="{{ file['id'] }}"
-             onclick="showModal(this)">
-            <img src="/image/{{ file['id'] }}" alt="Image" onerror="this.onerror=null;this.src='/static/placeholder.png';">
-            <div class="meta">
-                <div style="font-weight:bold;">{{ file['file_path'].split('/')[-1] }}</div>
-                <div style="font-size:0.85em; color:#666;">{{ file['last_scanned'] }}</div>
-            </div>
-        </div>
-        {% endfor %}
-    </div>
 
-    <div class="pagination" style="margin-top: 1rem; text-align: center;">
+    <div class="pagination" style="margin-bottom: 1rem; text-align: center;">
         {% set total_pages = (total // page_size) + (1 if total % page_size > 0 else 0) %}
         <button
             onclick="goToPage({{ page - 1 }})"
@@ -79,6 +68,23 @@
             style="width: 4rem; margin-left: 1rem;"
         />
     </div>
+
+    <!-- File Operations Toolbar -->
+    <div id="file-ops-toolbar" style="display: none;">
+        <label class="select-all-label">
+            <input type="checkbox" id="select-all-checkbox" /> Select All
+        </label>
+        <span class="ops-count" id="selected-count">0 selected</span>
+        <button id="move-btn" disabled>Move</button>
+        <button id="copy-btn" disabled>Copy</button>
+        <button id="delete-btn" disabled>Delete</button>
+        <button id="clear-selection-btn" type="button">Clear Selection</button>
+    </div>
+
+    <div class="gallery" style="margin-top: 1rem;">
+        {% include 'gallery_items.html' %}
+    </div>
+</div>
 </div>
 <div class="modal" id="modal">
     <div class="modal-content">
@@ -173,21 +179,21 @@ function applySearch() {
 
     let url = '/?';
     if (searchInput.value.trim() !== '') {
-        url += 'search=' + encodeURIComponent(searchInput.value.trim()) + '&';
+        url += "search=" + encodeURIComponent(searchInput.value.trim()) + "&";
     }
     logics.forEach((logic, i) => {
-        url += 'logics=' + encodeURIComponent(logic) + '&';
+        url += "logics=" + encodeURIComponent(logic) + "&";
     });
     values.forEach((value, i) => {
-        url += 'values=' + encodeURIComponent(value) + '&';
+        url += "values=" + encodeURIComponent(value) + "&";
     });
     // Remove trailing &
-    if (url.endsWith('&')) {
+    if (url.endsWith("&")) {
         url = url.slice(0, -1);
     }
 
     // Append current page=1 when applying new search
-    url += '&page=1';
+    url += "&page=1";
 
     window.location.href = url;
 }
@@ -201,15 +207,15 @@ function goToPage(page) {
 
     let url = '/?';
     if (search.trim() !== '') {
-        url += 'search=' + encodeURIComponent(search) + '&';
+        url += "search=" + encodeURIComponent(search) + "&";
     }
     logics.forEach(logic => {
-        url += 'logics=' + encodeURIComponent(logic) + '&';
+        url += "logics=" + encodeURIComponent(logic) + "&";
     });
     values.forEach(value => {
-        url += 'values=' + encodeURIComponent(value) + '&';
+        url += "values=" + encodeURIComponent(value) + "&";
     });
-    url += 'page=' + page + '&page_size=' + pageSize;
+    url += "page=" + page + "&page_size=" + pageSize;
 
     window.location.href = url;
 }
@@ -248,7 +254,254 @@ window.onclick = function(event) {
 
 window.onload = () => {
     fetchFields();
+    setupGallerySelection();
+    setupSelectionModeToggle();
 };
+
+/* --- File Operations Selection Logic --- */
+function setupGallerySelection() {
+    const gallery = document.querySelector('.gallery');
+    if (!gallery) return;
+
+    const toolbar = document.getElementById('file-ops-toolbar');
+    const selectAllCheckbox = document.getElementById('select-all-checkbox');
+    const selectedCountSpan = document.getElementById('selected-count');
+    const moveBtn = document.getElementById('move-btn');
+    const copyBtn = document.getElementById('copy-btn');
+    const deleteBtn = document.getElementById('delete-btn');
+    const clearBtn = document.getElementById('clear-selection-btn');
+
+    let selectedIds = new Set();
+
+    function updateToolbar() {
+        const allCheckboxes = gallery.querySelectorAll('.thumb-checkbox');
+        const checked = gallery.querySelectorAll('.thumb-checkbox:checked');
+        const total = allCheckboxes.length;
+        const count = checked.length;
+        selectedCountSpan.textContent = count + " selected";
+        moveBtn.disabled = copyBtn.disabled = deleteBtn.disabled = count === 0;
+        toolbar.style.display = count > 0 ? "flex" : "none";
+        selectAllCheckbox.checked = count === total && total > 0;
+    }
+
+    function setSelectionMode(on) {
+        gallery.querySelectorAll('.thumb').forEach(thumb => {
+            const label = thumb.querySelector('.thumb-checkbox-label');
+            if (on) {
+                thumb.classList.add('selection-mode');
+                if (label) label.style.display = "block";
+            } else {
+                thumb.classList.remove('selection-mode');
+                if (label) label.style.display = "none";
+                // Uncheck all checkboxes and clear selection when disabling
+                const cb = thumb.querySelector('.thumb-checkbox');
+                if (cb) cb.checked = false;
+            }
+        });
+        if (!on) {
+            selectedIds.clear();
+            updateToolbar();
+        }
+    }
+
+    // Show checkbox on hover only if selection mode is enabled
+    gallery.addEventListener('mouseover', e => {
+        const thumb = e.target.closest('.thumb');
+        if (thumb && thumb.classList.contains('selection-mode')) {
+            const label = thumb.querySelector('.thumb-checkbox-label');
+            if (label) label.style.display = "block";
+        }
+    });
+    gallery.addEventListener('mouseout', e => {
+        const thumb = e.target.closest('.thumb');
+        if (thumb && thumb.classList.contains('selection-mode')) {
+            const label = thumb.querySelector('.thumb-checkbox-label');
+            if (label) label.style.display = "block";
+        }
+    });
+
+    // Checkbox click logic
+    gallery.addEventListener('change', e => {
+        if (e.target.classList.contains('thumb-checkbox')) {
+            const id = e.target.getAttribute('data-id');
+            if (e.target.checked) {
+                selectedIds.add(id);
+            } else {
+                selectedIds.delete(id);
+            }
+            setSelectionMode(selectedIds.size > 0);
+            updateToolbar();
+        }
+    });
+
+    // Select All logic
+    selectAllCheckbox.addEventListener('change', async e => {
+        const allCheckboxes = gallery.querySelectorAll('.thumb-checkbox');
+        if (e.target.checked) {
+            // Fetch all matching IDs from backend
+            const urlParams = new URLSearchParams(window.location.search);
+            const search = urlParams.get('search') || '';
+            const logics = urlParams.getAll('logics');
+            const values = urlParams.getAll('values');
+
+            let query = '/matching_ids?';
+            if (search.trim() !== '') {
+                query += "search=" + encodeURIComponent(search) + "&";
+            }
+            logics.forEach(logic => {
+                query += "logics=" + encodeURIComponent(logic) + "&";
+            });
+            values.forEach(value => {
+                query += "values=" + encodeURIComponent(value) + "&";
+            });
+            if (query.endsWith("&")) {
+                query = query.slice(0, -1);
+            }
+
+            try {
+                const response = await fetch(query);
+                if (!response.ok) {
+                    alert('Failed to fetch all matching IDs for Select All.');
+                    return;
+                }
+                const data = await response.json();
+                const allIds = new Set(data.ids.map(id => id.toString()));
+
+                // Check all checkboxes on current page and add their IDs
+                allCheckboxes.forEach(cb => {
+                    cb.checked = true;
+                    selectedIds.add(cb.getAttribute('data-id'));
+                });
+
+                // Add all fetched IDs to selectedIds
+                allIds.forEach(id => selectedIds.add(id));
+
+                setSelectionMode(selectedIds.size > 0);
+                updateToolbar();
+            } catch (error) {
+                alert('Error fetching all matching IDs: ' + error);
+            }
+        } else {
+            allCheckboxes.forEach(cb => {
+                cb.checked = false;
+                selectedIds.delete(cb.getAttribute('data-id'));
+            });
+            setSelectionMode(false);
+            updateToolbar();
+        }
+    });
+
+    // Clear Selection
+    clearBtn.addEventListener('click', () => {
+        const allCheckboxes = gallery.querySelectorAll('.thumb-checkbox');
+        allCheckboxes.forEach(cb => {
+            cb.checked = false;
+            selectedIds.delete(cb.getAttribute('data-id'));
+        });
+        setSelectionMode(false);
+        updateToolbar();
+    });
+
+    // File operation button handlers (to be implemented)
+    moveBtn.addEventListener('click', () => {
+        handleFileOperation('move', Array.from(selectedIds));
+    });
+    copyBtn.addEventListener('click', () => {
+        handleFileOperation('copy', Array.from(selectedIds));
+    });
+    deleteBtn.addEventListener('click', () => {
+        handleFileOperation('delete', Array.from(selectedIds));
+    });
+
+    // Initial state
+    setSelectionMode(false);
+    updateToolbar();
+}
+
+async function handleFileOperation(op, ids) {
+    if (!ids || ids.length === 0) return;
+    if (op === 'delete') {
+        if (!confirm(`Are you sure you want to delete ${ids.length} image(s)? This cannot be undone.`)) return;
+    }
+
+    let destination = null;
+    if (op === 'move' || op === 'copy') {
+        try {
+            const response = await fetch('/select_folder', { method: 'POST' });
+            if (!response.ok) {
+                alert('Folder selection was cancelled or failed.');
+                return;
+            }
+            const data = await response.json();
+            destination = data.folder;
+        } catch (error) {
+            alert('Error selecting folder: ' + error);
+            return;
+        }
+    }
+
+    try {
+        const response = await fetch('/file_operation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ operation: op, ids: ids, destination: destination }),
+        });
+        if (!response.ok) {
+            const errorData = await response.json();
+            alert('File operation failed: ' + (errorData.detail || 'Unknown error'));
+            return;
+        }
+        alert(`Operation ${op} completed successfully.`);
+        // Refresh the page or update gallery to reflect changes
+        window.location.reload();
+    } catch (error) {
+        alert('Error performing file operation: ' + error);
+    }
+}
+function setupSelectionModeToggle() {
+    const selectionModeCheckbox = document.getElementById('toggle-selection-mode');
+    const gallery = document.querySelector('.gallery');
+    if (!selectionModeCheckbox || !gallery) return;
+
+    selectionModeCheckbox.addEventListener('change', function() {
+        if (this.checked) {
+            gallery.querySelectorAll('.thumb').forEach(thumb => {
+                thumb.classList.add('selection-mode');
+                const label = thumb.querySelector('.thumb-checkbox-label');
+                if (label) label.style.display = "block";
+            });
+        } else {
+            gallery.querySelectorAll('.thumb').forEach(thumb => {
+                thumb.classList.remove('selection-mode');
+                const label = thumb.querySelector('.thumb-checkbox-label');
+                if (label) label.style.display = "none";
+                // Uncheck all checkboxes
+                const cb = thumb.querySelector('.thumb-checkbox');
+                if (cb) cb.checked = false;
+            });
+            // Hide toolbar and clear selection
+            const toolbar = document.getElementById('file-ops-toolbar');
+            if (toolbar) toolbar.style.display = "none";
+            const selectedCountSpan = document.getElementById('selected-count');
+            if (selectedCountSpan) selectedCountSpan.textContent = "0 selected";
+        }
+    });
+
+    // Set initial state
+    if (selectionModeCheckbox.checked) {
+        gallery.querySelectorAll('.thumb').forEach(thumb => {
+            thumb.classList.add('selection-mode');
+            const label = thumb.querySelector('.thumb-checkbox-label');
+            if (label) label.style.display = "block";
+        });
+    } else {
+        gallery.querySelectorAll('.thumb').forEach(thumb => {
+            thumb.classList.remove('selection-mode');
+            const label = thumb.querySelector('.thumb-checkbox-label');
+            if (label) label.style.display = "none";
+        });
+    }
+}
 </script>
 </body>
 </html>
