@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+jinja2
+sqlite3
+sd-parsers
+alive-progress
