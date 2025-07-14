@@ -4,6 +4,23 @@
 
 This project indexes images and their metadata into a SQLite database and provides a web UI to browse, search, and manage the images.
 
+## Project Structure Diagram
+
+Below is a Mermaid chart representing the main components and relationships in this project.  
+For a larger view, see [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md).
+
+```mermaid
+graph TD
+    A[sd_index_manager.py] -->|Uses| B[sd_index.db-shm]
+    A -->|Uses| C[sd_index.db-wal]
+    A -->|Imports| D[webui/main.py]
+    D -->|Renders| E[webui/templates/gallery.html]
+    D -->|Renders| F[webui/templates/gallery_items.html]
+    E -->|Uses| G[webui/static/gallery.css]
+    F -->|Uses| G
+    H[sd_parsers_test.py] -->|Tests| A
+    I[test/*.jpeg] -->|Test Images| H
+```
 ## Features
 
 - Index images from a directory, extracting metadata.
