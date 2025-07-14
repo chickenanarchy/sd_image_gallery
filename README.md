@@ -11,13 +11,22 @@ For a larger view, see [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md).
 
 ```mermaid
 graph TD
-    A[sd_index_manager.py] -->|Uses| B[sd_index.db-shm]
-    A -->|Uses| C[sd_index.db-wal]
-    A -->|Imports| D[webui/main.py]
-    D -->|Renders| E[webui/templates/gallery.html]
-    D -->|Renders| F[webui/templates/gallery_items.html]
-    E -->|Uses| G[webui/static/gallery.css]
-    F -->|Uses| G
+    subgraph Backend [Backend: FastAPI, Python]
+        A[FastAPI App]
+        B[SQLite Database]
+        A -->|Reads/Writes| B
+    end
+
+    subgraph Frontend [Frontend: HTMX, Jinja2, CSS]
+        C[HTMX Interactions]
+        D[Jinja2 Templates]
+        E[CSS Styles]
+        D -->|Uses| E
+        C -->|Triggers| D
+    end
+
+    A -->|Serves| D
+    D -->|Displays| C
 ```
 ## Features
 
