@@ -4,6 +4,7 @@
 
 This project indexes images and their metadata into a SQLite database and provides a web UI to browse, search, and manage the images.
 
+![Screenshot](screenshot.png)
 ## Project Structure Diagram
 
 Below is a Mermaid chart representing the main components and relationships in this project.  
