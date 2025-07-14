@@ -9,5 +9,3 @@ graph TD
     D -->|Renders| F[webui/templates/gallery_items.html]
     E -->|Uses| G[webui/static/gallery.css]
     F -->|Uses| G
-    H[sd_parsers_test.py] -->|Tests| A
-    I[test/*.jpeg] -->|Test Images| H
