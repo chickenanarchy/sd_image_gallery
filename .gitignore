@@ -1,4 +1,6 @@
-# Ignore the SQLite database file
+# Ignore the primary SQLite database and transient / sidecar files
 sd_index.db
 sd_index.db-shm
 sd_index.db-wal
+# Catch any additional SQLite sidecars or repaired/corrupt copies
+sd_index.db*
