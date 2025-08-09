@@ -1,2 +1,4 @@
 # Ignore the SQLite database file
 sd_index.db
+sd_index.db-shm
+sd_index.db-wal

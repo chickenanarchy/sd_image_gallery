@@ -4,3 +4,4 @@ jinja2
 sqlite3
 sd-parsers
 alive-progress
+pillow

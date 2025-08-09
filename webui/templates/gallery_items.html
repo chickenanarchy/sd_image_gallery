@@ -7,6 +7,7 @@
     data-file-path="{{ file['file_path']|e }}"
     data-meta='{{ file['metadata_json']|e }}'
     data-id="{{ file['id'] }}"
+    data-hash="{{ file['file_hash'] }}"
     onclick="if(event.target.type !== 'checkbox') showModal(this)"
     onkeydown="if(event.key==='Enter' || event.key===' ') { showModal(this); event.preventDefault(); }"
     style="position: relative;"
@@ -16,7 +17,7 @@
         <span class="custom-checkbox"></span>
     </label>
     <img
-        src="/image/{{ file['id'] }}"
+        src="/image/{{ file['id'] }}?v={{ file['file_hash'] }}"
         alt="Image thumbnail for {{ file['file_path'].split('/')[-1] }}"
         onerror="this.onerror=null;this.src='/static/placeholder.png';"
         loading="lazy"
