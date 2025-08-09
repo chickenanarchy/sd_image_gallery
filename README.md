@@ -1,133 +1,74 @@
 # SD Image Gallery
 
-## Overview
-
-This project indexes images and their metadata into a SQLite database and provides a FastAPI powered web UI to browse, search, and manage the images. It supports incremental re-indexing, optional FTS5 accelerated search, file operations, and a metadata / full-size image modal with copy utilities.
+Fast, file‑system based image metadata index + minimal web gallery.
 
 ![Screenshot](screenshot.png)
-## Project Structure Diagram
 
-Below is a Mermaid chart representing the main components and relationships in this project.  
-For a larger view, see [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md).
+## What It Does
+Index common image formats into a single SQLite database (with optional FTS5) and provide a lightweight FastAPI + HTMX UI to search, browse, preview metadata, and perform safe bulk file operations.
 
-```mermaid
-graph TD
-    subgraph Backend [Backend: FastAPI, Python]
-        A[FastAPI App]
-        B[SQLite Database]
-        A -->|Reads/Writes| B
-    end
+## Key Features (Concise)
+- Incremental indexing (hash + size + times + dimensions + parsed metadata)
+- Optional FTS5 accelerated search (falls back to LIKE)
+- Multi-term search builder (AND / OR / NOT, LEN operators, empty `{}`)
+- Responsive gallery + metadata modal (copy path / JSON)
+- Semantic “Select All” (query-scope) bulk Move / Copy / Delete
+- Async background file operations with progress polling
+- Collision‑safe naming on move/copy; DB + FTS kept in sync
+- Pagination with jump links (up to 200 per page)
 
-    subgraph Frontend [Frontend: HTMX, Jinja2, CSS]
-        C[HTMX Interactions]
-        D[Jinja2 Templates]
-        E[CSS Styles]
-        D -->|Uses| E
-        C -->|Triggers| D
-    end
-
-    A -->|Serves| D
-    D -->|Displays| C
+## Quick Start
+```bash
+python sd_index_manager.py   # choose option 1 to index, option 3 to launch UI
+# or directly
+uvicorn webui.main:app --reload
 ```
-## Features
+Open http://127.0.0.1:8000
 
-Core
-- Incremental indexing of images (PNG, JPG/JPEG, WEBP, BMP, TIFF) with:
-  - SHA256 content hash
-  - File size, mtime/ctime
-  - Width / height (via Pillow, best-effort)
-  - Parsed metadata (via sd-parsers) serialized to JSON
-- Automatic detection and creation of FTS5 virtual table (if SQLite build supports it) with triggers to keep metadata in sync.
-- Automatic database integrity check and self-repair attempt before indexing (corrupted DB moved aside and rebuilt).
+## Using the UI
+1. Search: enter a main term; add extra terms (AND/OR/NOT). Use `LEN>0`, `{}` for empty metadata.
+2. Click a thumbnail for full view + metadata panel.
+3. Enable Selection Mode → (optionally) Select All → perform Move / Copy / Delete.
+4. During large operations a status bar shows live progress.
 
-Search
-- Unified search builder supporting:
-  - Simple substring search (LIKE) when FTS not available
-  - FTS5 powered term / phrase search (quoted automatically) when available
-  - LEN operators: e.g. `LEN>0`, `LEN=0` (length of metadata JSON text)
-  - Exact empty metadata: `{}`
-  - Multiple field terms combined with AND / OR / NOT (NOT treated as unary AND NOT)
-- Pagination with configurable page & page_size (capped at 200) and total count display.
+## Bulk Operations (Semantic Select All)
+- Global select-all applies to the entire current query, not just the visible page.
+- Operations stream in batches; progress endpoint: `/file_operation_status/{job_id}`.
+- Copy inserts new DB rows immediately (no re-index needed).
 
-Web UI
-- Responsive gallery grid with lazy-loaded thumbnails.
-- Full-size image modal shows:
-  - Large preview (cache-busted by file hash param)
-  - Copyable file path bar
-  - Scrollable formatted metadata JSON panel with copy + hide/show toggle
-- Distinct metadata field discovery endpoint (`/metadata_fields`) used to populate dynamic multi-term search UI.
-- Selection mode with bulk file operations and dynamic toolbar.
+## Project Structure (Top-Level)
+```
+sd_index_manager.py    # CLI: init, index, launch web UI
+webui/                 # FastAPI app, templates, static assets
+  main.py              # Routes, async job system, file ops
+  search_utils.py      # Search WHERE clause builder
+  templates/           # Jinja2 templates (gallery, items)
+  static/              # CSS
+PROJECT_STRUCTURE.md   # Diagram
+requirements.txt
+README.md
+```
 
-File Operations (constrained & validated)
-- Move: relocates image on disk and updates DB path (within allowed roots)
-- Copy: duplicates file on disk (copy not auto-indexed until next run)
-- Delete: removes file from disk and deletes DB row
-- Root path whitelisting prevents operations outside configured allowed roots.
+## Indexing Notes
+- Re-run the indexer to pick up new or modified files; unchanged entries are skipped.
+- DB auto-migrates new columns; FTS5 triggers maintain search index.
+- Integrity check + self-repair attempt before indexing.
 
-Performance & Robustness
-- Batch INSERT/UPDATE commits for scalability
-- WAL journal mode + NORMAL synchronous for balance of speed & durability
-- Memory/temp PRAGMA tuning (best-effort) and FTS prefix indexes for faster prefix searching
-- Automatic hash query parameter for immutable browser caching of unchanged images
-
-Accessibility / UX
-- Keyboard activation (Enter/Space) on thumbnails
-- Escape closes modal
-- Buttons have aria labels / focusable elements
-- Copy feedback state changes ("Copied")
-
-Extensibility
-- Centralized search utility (`webui/search_utils.py`) for consistent logic across endpoints
-- Schema auto-migration of new columns (size, times, dimensions) on startup
-
-Planned / Possible Enhancements (not yet implemented)
-- Structured / collapsible metadata key browser
-- Dimension-based search filters (width / height comparisons)
-- Advanced grouping & precedence in search (parentheses)
-- Authentication / authorization for destructive operations
-- Structured logging & metrics
-
-## Usage
-
-1. Initialize / ensure schema: `python sd_index_manager.py` (auto creates DB if missing).
-2. Choose option 1 to index a root folder (recursive). Re-run to incrementally update (skips unchanged files by size+mtime).
-3. Option 3 launches the Web UI (or run `uvicorn webui.main:app --reload`).
-4. Use the search bar:
-  - Enter a main query + additional fields with AND/OR/NOT.
-  - Use `{}` for images with explicitly empty metadata.
-  - Use `LEN=0` or `LEN>0` style expressions for length-based filtering.
-  - When FTS active: multi-word terms become phrase searches unless you include operators / wildcards.
-5. Click a thumbnail for full-size view + metadata + file path (copy buttons available).
-6. Toggle selection mode to bulk Move / Copy / Delete. (Moves update DB; copies require re-index to appear; deletes remove DB rows.)
-
-Re-indexing Safety
-- Integrity check runs before indexing; malformed DBs are backed up and rebuilt automatically.
-- Interrupted runs are resilient thanks to batch commits and WAL.
-
-## Development
-
-- The backend is built with FastAPI.
-- The frontend uses Jinja2 templates and HTMX for interactivity.
-- SQLite is used for metadata storage.
-
-## Notes
-
-- Copies created via the UI are not tracked in the database until you re-run the indexer over their destination folder.
-- Deletions and moves are immediate and reflected after page refresh (UI reload or manual navigation).
-- FTS is optional; if your SQLite build lacks FTS5, searches fall back to LIKE (slower, fewer capabilities).
-- Large bulk selections are capped (50k IDs per operation) to prevent excessive memory usage.
-- Page size limited to 200 to avoid excessive payload sizes.
+## Configuration Touchpoints
+- Allowed file-operation roots: `ALLOWED_ROOTS` in `webui/main.py`.
+- Page size limit: `MAX_PAGE_SIZE` in `webui/main.py`.
+- Batch sizes / job behavior: constants near file op code.
 
 ## Requirements
+See `requirements.txt` (FastAPI, Pillow, sd-parsers, etc.). Ensure your Python has SQLite with FTS5 if you want full-text search.
 
-See `requirements.txt`. Ensure Pillow has image format support you need.
-
-## Development Tips
-
-- Modify search logic once in `webui/search_utils.py` to affect all endpoints.
-- Add new DB columns by altering `init_db()`; it will attempt migration without destructively recreating.
-- Consider adding structured logging (e.g., `structlog` or Python `logging`) for production use.
+## Development
+- Single-process, no external services beyond SQLite file.
+- Modify search behavior centrally in `search_utils.py`.
+- Add routes or UI tweaks with minimal reload (uvicorn --reload).
 
 ## License
+Add your preferred license text here.
 
-(Add your license here.)
+---
+Concise by design: for a visual component overview see `PROJECT_STRUCTURE.md`.

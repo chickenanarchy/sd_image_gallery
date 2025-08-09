@@ -2,19 +2,27 @@
 
 ```mermaid
 graph TD
-    subgraph Backend [Backend: FastAPI, Python]
-        A[FastAPI App]
-        B[SQLite Database]
-        A -->|Reads/Writes| B
+    subgraph Indexer [CLI Indexer]
+        I1[sd_index_manager.py]
+        I1 --> DB[(SQLite DB)]
     end
 
-    subgraph Frontend [Frontend: HTMX, Jinja2, CSS]
-        C[HTMX Interactions]
-        D[Jinja2 Templates]
-        E[CSS Styles]
-        D -->|Uses| E
-        C -->|Triggers| D
+    subgraph WebAPI [FastAPI App]
+        R[Routes & Search]
+        J[Async Job Manager]
+        R --> DB
+        J --> DB
     end
 
-    A -->|Serves| D
-    D -->|Displays| C
+    subgraph Frontend [HTMX + Jinja2]
+        T[Templates]
+        H[HTMX / JS]
+        C[CSS]
+        H --> R
+        T --> H
+        T --> C
+    end
+
+    I1 --> R
+    R --> T
+    J --> H
