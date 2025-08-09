@@ -100,6 +100,32 @@
     <div class="gallery" style="margin-top: 1rem;">
         {% include 'gallery_items.html' %}
     </div>
+    <!-- Bottom Pagination / Jump Links -->
+    {% set total_pages = (total // page_size) + (1 if total % page_size > 0 else 0) %}
+    {% if total_pages > 1 %}
+    <nav class="pagination" aria-label="Gallery pages" style="margin:2rem 0 0.5rem; text-align:center; display:flex; flex-wrap:wrap; gap:0.4rem; justify-content:center;">
+        {% set window = 2 %}
+        {% set ns = namespace(last=0) %}
+        <style>
+            .page-link{ text-decoration:none; border:1px solid #ccc; padding:0.34rem 0.62rem; border-radius:4px; min-width:34px; display:inline-block; color:#0078d4; font-size:0.85rem; }
+            .page-link:hover{ background:#eef6ff; }
+            .page-link.current{ background:#0078d4; color:#fff; border-color:#0078d4; cursor:default; }
+        </style>
+        {% for p in range(1, total_pages + 1) %}
+            {% if p <= 2 or p > total_pages - 2 or (p >= page - window and p <= page + window) %}
+                {% if ns.last + 1 < p %}
+                    <span style="padding:0 0.4rem; color:#666;">…</span>
+                {% endif %}
+                {% if p == page %}
+                    <span aria-current="page" class="page-link current">{{ p }}</span>
+                {% else %}
+                    <a href="#page-{{ p }}" data-page="{{ p }}" class="page-link">{{ p }}</a>
+                {% endif %}
+                {% set ns.last = p %}
+            {% endif %}
+        {% endfor %}
+    </nav>
+    {% endif %}
 </div>
 </div>
 <div class="modal" id="modal">
@@ -260,26 +286,29 @@ function jumpToPage(value) {
 }
 
 function showModal(el) {
-    var imgPath = el.getAttribute('data-file-path');
-    var metaJson = el.getAttribute('data-meta');
-    var id = el.getAttribute('data-id');
-    var hash = el.getAttribute('data-hash');
-    // Use hash query param to ensure browser treats each unique file content as different resource
+    const imgPath = el.getAttribute('data-file-path');
+    const id = el.getAttribute('data-id');
+    const hash = el.getAttribute('data-hash');
+    const modal = document.getElementById('modal');
+    const metaPre = document.getElementById('modal-meta');
+    // Optimistic placeholder while fetching metadata
+    if (metaPre) metaPre.textContent = 'Loading metadata...';
     document.getElementById('modal-img').src = "/image/" + id + (hash ? ("?v=" + hash) : "");
-    try {
-        var metaObj = JSON.parse(metaJson);
-        document.getElementById('modal-meta').textContent = JSON.stringify(metaObj, null, 2);
-    } catch (e) {
-        document.getElementById('modal-meta').textContent = metaJson;
-    }
-    document.getElementById('modal').style.display = "flex";
+    modal.style.display = 'flex';
     const pathEl = document.getElementById('modal-path-text');
     if(pathEl){ pathEl.textContent = imgPath || ''; pathEl.parentElement.title = imgPath || ''; }
-    // Reset collapsed state
-    document.getElementById('modal').classList.remove('meta-collapsed');
+    modal.classList.remove('meta-collapsed');
     const toggleBtn = document.getElementById('toggle-meta-btn');
     if (toggleBtn) toggleBtn.textContent = 'Hide';
-    // (Split persistence removed for simplified grid approach)
+    // Lazy fetch metadata
+    fetch('/metadata/' + id)
+        .then(r => r.ok ? r.json() : Promise.reject('Failed to fetch metadata'))
+        .then(data => {
+            let mj = data.metadata_json || ''; let formatted = mj;
+            try { if(mj){ formatted = JSON.stringify(JSON.parse(mj), null, 2); } } catch(e){}
+            if (metaPre) metaPre.textContent = formatted;
+        })
+        .catch(err => { if(metaPre) metaPre.textContent = 'Error loading metadata'; console.error(err); });
 }
 
 function hideModal() {
@@ -301,6 +330,14 @@ window.onload = () => {
     if(prevBtn){ prevBtn.addEventListener('click', ()=>{ const p = parseInt(prevBtn.getAttribute('data-target-page')); if(!isNaN(p)) goToPage(p); }); }
     const nextBtn = document.getElementById('next-page-btn');
     if(nextBtn){ nextBtn.addEventListener('click', ()=>{ const p = parseInt(nextBtn.getAttribute('data-target-page')); if(!isNaN(p)) goToPage(p); }); }
+    document.addEventListener('click', e => {
+        const link = e.target.closest('a.page-link[data-page]');
+        if(link){
+            e.preventDefault();
+            const p = parseInt(link.getAttribute('data-page'));
+            if(!isNaN(p)) goToPage(p);
+        }
+    });
 };
 
 document.addEventListener('keydown', (e) => {
@@ -361,14 +398,21 @@ function setupGallerySelection() {
     let selectedIds = new Set();
 
     function updateToolbar() {
-        const allCheckboxes = gallery.querySelectorAll('.thumb-checkbox');
-        const checked = gallery.querySelectorAll('.thumb-checkbox:checked');
-        const total = allCheckboxes.length;
-        const count = checked.length;
-        selectedCountSpan.textContent = count + " selected";
-        moveBtn.disabled = copyBtn.disabled = deleteBtn.disabled = count === 0;
-        toolbar.style.display = count > 0 ? "flex" : "none";
-        selectAllCheckbox.checked = count === total && total > 0;
+        let count;
+        if (globalQuerySelectAll) {
+            // Show total matching minus exclusions if we know it
+            if (globalMatchTotal !== null) {
+                count = Math.max(0, globalMatchTotal - excludedIds.size);
+            } else {
+                count = selectedIds.size; // fallback until fetched
+            }
+            selectedCountSpan.textContent = count + " selected (all matching)";
+        } else {
+            count = selectedIds.size;
+            selectedCountSpan.textContent = count + " selected";
+        }
+        moveBtn.disabled = copyBtn.disabled = deleteBtn.disabled = (count === 0);
+        toolbar.style.display = (count > 0) ? "flex" : "none";
     }
 
     function setSelectionMode(on) {
@@ -415,64 +459,35 @@ function setupGallerySelection() {
                 selectedIds.add(id);
             } else {
                 selectedIds.delete(id);
+                if (globalQuerySelectAll) {
+                    // Track explicit exclusion when in global select mode
+                    excludedIds.add(id);
+                }
             }
-            setSelectionMode(selectedIds.size > 0);
+            setSelectionMode(selectedIds.size > 0 || globalQuerySelectAll);
             updateToolbar();
         }
     });
 
     // Select All logic
+    let globalQuerySelectAll = false;
+    let globalMatchTotal = null; // total count of matching images when global select-all enabled
+    const excludedIds = new Set(); // explicit exclusions when global mode on
     selectAllCheckbox.addEventListener('change', async e => {
         const allCheckboxes = gallery.querySelectorAll('.thumb-checkbox');
         if (e.target.checked) {
-            // Fetch all matching IDs from backend
-            const urlParams = new URLSearchParams(window.location.search);
-            const search = urlParams.get('search') || '';
-            const logics = urlParams.getAll('logics');
-            const values = urlParams.getAll('values');
-
-            let query = '/matching_ids?';
-            if (search.trim() !== '') {
-                query += "search=" + encodeURIComponent(search) + "&";
-            }
-            logics.forEach(logic => {
-                query += "logics=" + encodeURIComponent(logic) + "&";
-            });
-            values.forEach(value => {
-                query += "values=" + encodeURIComponent(value) + "&";
-            });
-            if (query.endsWith("&")) {
-                query = query.slice(0, -1);
-            }
-
-            try {
-                const response = await fetch(query);
-                if (!response.ok) {
-                    alert('Failed to fetch all matching IDs for Select All.');
-                    return;
-                }
-                const data = await response.json();
-                const allIds = new Set(data.ids.map(id => id.toString()));
-
-                // Check all checkboxes on current page and add their IDs
-                allCheckboxes.forEach(cb => {
-                    cb.checked = true;
-                    selectedIds.add(cb.getAttribute('data-id'));
-                });
-
-                // Add all fetched IDs to selectedIds
-                allIds.forEach(id => selectedIds.add(id));
-
-                setSelectionMode(selectedIds.size > 0);
-                updateToolbar();
-            } catch (error) {
-                alert('Error fetching all matching IDs: ' + error);
-            }
+            globalQuerySelectAll = true;
+            excludedIds.clear();
+            // Mark current page items checked visually
+            allCheckboxes.forEach(cb => { cb.checked = true; selectedIds.add(cb.getAttribute('data-id')); });
+            setSelectionMode(true);
+            // Fetch total matching count for display
+            fetchMatchingCount().then(()=> updateToolbar()).catch(()=> updateToolbar());
         } else {
-            allCheckboxes.forEach(cb => {
-                cb.checked = false;
-                selectedIds.delete(cb.getAttribute('data-id'));
-            });
+            globalQuerySelectAll = false;
+            excludedIds.clear();
+            allCheckboxes.forEach(cb => { cb.checked = false; });
+            selectedIds.clear();
             setSelectionMode(false);
             updateToolbar();
         }
@@ -485,65 +500,107 @@ function setupGallerySelection() {
             cb.checked = false;
             selectedIds.delete(cb.getAttribute('data-id'));
         });
+        globalQuerySelectAll = false;
+        excludedIds.clear();
         setSelectionMode(false);
         updateToolbar();
     });
 
     // File operation button handlers (to be implemented)
-    moveBtn.addEventListener('click', () => {
-        handleFileOperation('move', Array.from(selectedIds));
-    });
-    copyBtn.addEventListener('click', () => {
-        handleFileOperation('copy', Array.from(selectedIds));
-    });
-    deleteBtn.addEventListener('click', () => {
-        handleFileOperation('delete', Array.from(selectedIds));
-    });
+    moveBtn.addEventListener('click', () => { handleFileOperation('move'); });
+    copyBtn.addEventListener('click', () => { handleFileOperation('copy'); });
+    deleteBtn.addEventListener('click', () => { handleFileOperation('delete'); });
 
     // Initial state
     setSelectionMode(false);
     updateToolbar();
 }
 
-async function handleFileOperation(op, ids) {
-    if (!ids || ids.length === 0) return;
+async function handleFileOperation(op) {
+    const ids = Array.from(selectedIds);
+    if (!globalQuerySelectAll && ids.length === 0) return;
     if (op === 'delete') {
-        if (!confirm(`Are you sure you want to delete ${ids.length} image(s)? This cannot be undone.`)) return;
+        const scopeDesc = globalQuerySelectAll ? 'ALL matching images (this may be very large)' : `${ids.length} image(s)`;
+        if (!confirm(`Are you sure you want to delete ${scopeDesc}? This cannot be undone.`)) return;
     }
 
     let destination = null;
     if (op === 'move' || op === 'copy') {
-        try {
-            const response = await fetch('/select_folder', { method: 'POST' });
-            if (!response.ok) {
-                alert('Folder selection was cancelled or failed.');
-                return;
-            }
-            const data = await response.json();
-            destination = data.folder;
-        } catch (error) {
-            alert('Error selecting folder: ' + error);
-            return;
-        }
+    destination = prompt('Enter destination folder path:');
+    if(!destination){ return; }
     }
 
+    // Determine scope
+    const urlParams = new URLSearchParams(window.location.search);
+    const search = urlParams.get('search') || '';
+    const logics = urlParams.getAll('logics');
+    const values = urlParams.getAll('values');
+    let scope;
+    if (globalQuerySelectAll) {
+        scope = { type: 'query', search, logics, values, excluded: Array.from(excludedIds) };
+    } else {
+        scope = { type: 'ids', ids: ids.map(x=>parseInt(x,10)) };
+    }
     try {
-        const response = await fetch('/file_operation', {
+        const response = await fetch('/file_operation_async', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ operation: op, ids: ids, destination: destination }),
+            body: JSON.stringify({ operation: op, scope, destination })
         });
-        if (!response.ok) {
-            const errorData = await response.json();
-            alert('File operation failed: ' + (errorData.detail || 'Unknown error'));
-            return;
-        }
-        alert(`Operation ${op} completed successfully.`);
-        // Refresh the page or update gallery to reflect changes
-        window.location.reload();
-    } catch (error) {
-        alert('Error performing file operation: ' + error);
+        const data = await response.json();
+        if(!response.ok){ alert('Failed to start operation: ' + (data.detail || 'Unknown error')); return; }
+        const jobId = data.job_id;
+        monitorJob(jobId, op);
+    } catch(err){
+        alert('Error starting operation: ' + err);
     }
+}
+
+async function monitorJob(jobId, op){
+    const statusEl = ensureStatusBar();
+    let done = false;
+    while(!done){
+        try {
+            const r = await fetch('/file_operation_status/' + jobId);
+            if(!r.ok){ statusEl.textContent = 'Job ' + jobId + ' status fetch failed.'; break; }
+            const s = await r.json();
+            const total = s.total || 0;
+            const processed = s.processed || 0;
+            const pct = total ? ((processed/total)*100).toFixed(1) : (s.status==='completed'? '100.0':'0.0');
+            statusEl.textContent = `Operation ${op} - ${s.status} - ${processed}/${total||'?'} (${pct}%) errors:${s.error_count}`;
+            if(s.status === 'completed' || s.status === 'failed'){ done = true; break; }
+        } catch(e){ statusEl.textContent = 'Monitoring error: ' + e; break; }
+        await new Promise(res=>setTimeout(res, 1200));
+    }
+    setTimeout(()=>window.location.reload(), 1400);
+}
+
+function ensureStatusBar(){
+    let bar = document.getElementById('op-status-bar');
+    if(!bar){
+        bar = document.createElement('div');
+        bar.id = 'op-status-bar';
+        bar.style.cssText = 'position:fixed;bottom:8px;left:8px;background:#222;color:#eee;padding:6px 10px;border-radius:4px;font-size:12px;z-index:1500;';
+        document.body.appendChild(bar);
+    }
+    return bar;
+}
+
+async function fetchMatchingCount(){
+    globalMatchTotal = null;
+    const urlParams = new URLSearchParams(window.location.search);
+    const search = urlParams.get('search') || '';
+    const logics = urlParams.getAll('logics');
+    const values = urlParams.getAll('values');
+    let query = '/matching_count?';
+    if (search.trim() !== '') query += 'search=' + encodeURIComponent(search) + '&';
+    logics.forEach(l=> query += 'logics=' + encodeURIComponent(l) + '&');
+    values.forEach(v=> query += 'values=' + encodeURIComponent(v) + '&');
+    if(query.endsWith('&')) query = query.slice(0,-1);
+    const r = await fetch(query);
+    if(!r.ok) return;
+    const data = await r.json();
+    if(typeof data.total === 'number') globalMatchTotal = data.total;
 }
 function setupSelectionModeToggle() {
     const selectionModeCheckbox = document.getElementById('toggle-selection-mode');

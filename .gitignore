@@ -4,3 +4,15 @@ sd_index.db-shm
 sd_index.db-wal
 # Catch any additional SQLite sidecars or repaired/corrupt copies
 sd_index.db*
+
+# Python caches / compiled artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local test image assets (not needed in repository push of scripts)
+test/
+
+# Pytest cache
+.pytest_cache/

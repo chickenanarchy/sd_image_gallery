@@ -96,6 +96,11 @@ def init_db():
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_last_scanned ON files(last_scanned DESC)")
         except sqlite3.OperationalError:
             pass
+        # Composite index to accelerate ORDER BY last_scanned DESC, id DESC pagination
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_last_scanned_id ON files(last_scanned DESC, id DESC)")
+        except sqlite3.OperationalError:
+            pass
         try:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_file_hash ON files(file_hash)")
         except sqlite3.OperationalError:
