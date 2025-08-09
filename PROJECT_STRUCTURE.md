@@ -1,30 +1,30 @@
 # Project Architecture
 
 ```mermaid
-%%{init: {'theme':'neutral','flowchart':{'curve':'basis'}} }%%
+%%{init: {"theme":"neutral","flowchart":{"curve":"basis"}} }%%
 flowchart LR
-    classDef comp fill:#f5f7fa,stroke:#d5dce3,stroke-width:1px,corner-radius:4px;
+    classDef comp fill:#f5f7fa,stroke:#d5dce3,stroke-width:1px;
     classDef store fill:#eef7ff,stroke:#8fb8e8;
     classDef virt fill:#fff4e5,stroke:#e2c188;
     classDef proc fill:#f0f5ff,stroke:#9bb3e5;
     classDef async fill:#fef6ff,stroke:#d9a8e6,stroke-dasharray:4 2;
 
     subgraph IDX[CLI Indexer]
-        I1[sd_index_manager.py\n(Recursive Scan + Parse)]:::proc
+        I1[sd_index_manager.py<br/>(Scan + Parse)]:::proc
     end
 
     subgraph DATA[SQLite Store]
-        TBL[(files table)\nPaths + Hash + Meta]:::store
-        FTS[(files_fts)\nFTS5 Virtual]:::virt
+        TBL[(files table<br/>paths+hash+meta)]:::store
+        FTS[(files_fts<br/>FTS5 virtual)]:::virt
     end
 
     subgraph APP[FastAPI]
-        R[Routes / Search Builder]:::comp
-        J[Async Job Manager\n(Bulk Ops Threads)]:::async
+        R[Routes / Search<br/>Builder]:::comp
+        J[Async Job Manager<br/>(Bulk Ops)]:::async
     end
 
     subgraph FRONTEND[Browser UI]
-        HTMX[HTMX Requests / Events]:::comp
+        HTMX[HTMX Requests]:::comp
         TPL[Jinja2 Templates]:::comp
         CSS[Gallery Styles]:::comp
     end
@@ -38,13 +38,12 @@ flowchart LR
     TPL --> CSS
     J -. progress JSON .-> HTMX
 
-    %% Legend
     subgraph LEGEND[Legend]
-        L1[comp = component]:::comp
-        L2[proc = long-running / processing]:::proc
-        L3[store = persisted data]:::store
-        L4[virt = virtual index]:::virt
-        L5[async = background tasks]:::async
+        L1[comp]:::comp
+        L2[proc]:::proc
+        L3[store]:::store
+        L4[virt]:::virt
+        L5[async]:::async
     end
 ```
 
