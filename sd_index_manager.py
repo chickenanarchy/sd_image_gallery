@@ -51,6 +51,31 @@ def ensure_fts(conn: sqlite3.Connection):
         # Likely FTS5 not compiled; warn user once
         print("Warning: Could not create FTS index (", e, ") - continuing without FTS.")
 
+def fts_exists(conn: sqlite3.Connection) -> bool:
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='files_fts'")
+        return cur.fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+def drop_fts(conn: sqlite3.Connection):
+    """Drop FTS5 table & associated triggers if present (best-effort)."""
+    cur = conn.cursor()
+    try:
+        cur.executescript(
+            """
+            DROP TRIGGER IF EXISTS files_ai;
+            DROP TRIGGER IF EXISTS files_ad;
+            DROP TRIGGER IF EXISTS files_au;
+            DROP TABLE IF EXISTS files_fts;
+            """
+        )
+        conn.commit()
+        print("Dropped existing FTS index & triggers for fast bulk load.")
+    except sqlite3.Error as e:  # pragma: no cover - best effort
+        print("Warning: failed to drop FTS objects:", e)
+
 def init_db():
     creating = not os.path.exists("sd_index.db")
     if creating:
@@ -180,12 +205,22 @@ def index_files():
         print("Aborting indexing due to unrecoverable database corruption.")
         return
 
+    # Optional fast bulk mode (drop & rebuild FTS afterwards)
+    fast_bulk = False
+    try:
+        fb_in = input("Enable fast bulk mode (drop & rebuild FTS at end)? [y/N]: ").strip().lower()
+        fast_bulk = fb_in in ('y','yes')
+    except Exception:
+        pass
+
     supported_exts = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff'}
     files_new = 0
     files_updated = 0
     files_skipped = 0
     files_deleted = 0
-    BATCH_SIZE = 1000
+    BATCH_SIZE = 5000  # increased batch size for fewer commits
+    WAL_CHECK_INTERVAL = 10_000  # run checkpoint every N processed files
+    processed_files = 0
     insert_batch = []  # tuples matching INSERT columns
     update_batch = []  # tuples matching UPDATE setters
 
@@ -209,6 +244,10 @@ def index_files():
             pass
         cursor.execute("PRAGMA temp_store = MEMORY;")
         cursor.execute("PRAGMA mmap_size = 300000000;")  # allow mmap for faster reads (best-effort)
+
+        pre_existing_fts = fts_exists(conn)
+        if fast_bulk and pre_existing_fts:
+            drop_fts(conn)
 
         # Count total candidate files for progress bar (only supported extensions)
         total_files = 0
@@ -293,6 +332,17 @@ def index_files():
                                 """, update_batch)
                                 conn.commit()
                                 update_batch.clear()
+                            # Periodic WAL checkpoint & stats every interval
+                            processed_files += 1
+                            if processed_files % WAL_CHECK_INTERVAL == 0:
+                                try:
+                                    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                                    # Lightweight progress stats
+                                    cursor.execute("SELECT COUNT(*) FROM files")
+                                    total_indexed = cursor.fetchone()[0]
+                                    print(f"\n[Checkpoint] Files in DB: {total_indexed} | WAL truncated | processed this run: {processed_files}")
+                                except sqlite3.Error:
+                                    pass
                     except sqlite3.DatabaseError as db_err:
                         if 'malformed' in str(db_err).lower():
                             print("Encountered malformed database during indexing. Attempting automatic repair...")
@@ -388,9 +438,18 @@ def index_files():
                     placeholders = ','.join(['?']*len(chunk))
                     cursor.execute(f"DELETE FROM files WHERE file_path IN ({placeholders})", chunk)
                 files_deleted = len(delete_list)
+        # Rebuild FTS if we deferred it
+        if fast_bulk and pre_existing_fts:
+            print("Rebuilding FTS index (this may take a moment)...")
+            ensure_fts(conn)
         # Ensure WAL mode persists
         try:
             cursor.execute("PRAGMA journal_mode = WAL;")
+        except sqlite3.Error:
+            pass
+        # Final checkpoint to shrink WAL after heavy writes
+        try:
+            cursor.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         except sqlite3.Error:
             pass
 
