@@ -5,10 +5,9 @@ Fast, file‑system based image metadata index + minimal web gallery.
 ![Screenshot](screenshot.png)
 
 ```mermaid
-%%{init: {"theme":"neutral","flowchart":{"curve":"basis"}} }%%
 flowchart LR
   subgraph CLI[Indexing CLI]
-    IDX[sd_index_manager.py<br/>Scan & Parse]
+    IDX[sd_index_manager.py]
   end
   subgraph STORE[SQLite]
     TBL[(files table)]
@@ -16,7 +15,7 @@ flowchart LR
   end
   subgraph API[FastAPI App]
     ROUTES[Routes / Search]
-    JOBS[Async Jobs<br/>(Bulk Ops)]
+    JOBS[Async Jobs (Bulk Ops)]
   end
   subgraph UI[Browser]
     HTMX[HTMX + JS]
@@ -24,14 +23,14 @@ flowchart LR
     CSS[CSS]
   end
 
-  IDX -->|insert / update| TBL
+  IDX -->|insert/update| TBL
   TBL --> FTS
   ROUTES --> TBL
   JOBS --> TBL
   HTMX --> ROUTES
   ROUTES --> TPL --> HTMX
   TPL --> CSS
-  JOBS -. status polling .-> HTMX
+  JOBS -. status .-> HTMX
   TBL --> ROUTES
 ```
 
