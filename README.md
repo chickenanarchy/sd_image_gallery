@@ -4,30 +4,29 @@ Fast, file‑system based image metadata index + minimal web gallery.
 
 ![Screenshot](screenshot.png)
 
+## Architecture
 ```mermaid
 graph TD
   subgraph Backend [Backend: FastAPI, Python]
     A[FastAPI App]
-    B[SQLite Database]
-    A -->|Reads/Writes| B
+    B[(SQLite DB)]
+    A -->|Reads / Writes| B
   end
-
-  subgraph Frontend [Frontend: HTMX, Jinja2, CSS]
+  subgraph Frontend [Frontend: HTMX + Jinja2]
     C[HTMX Interactions]
     D[Jinja2 Templates]
     E[CSS Styles]
     D -->|Uses| E
     C -->|Triggers| D
   end
-
-  A -->|Serves| D
-  D -->|Displays| C
+  A -->|Serves HTML / JSON| D
+  D -->|Renders UI| C
 ```
 
-## What It Does
+## Overview
 Indexes common image formats into a single SQLite database (with optional FTS5) and serves a lightweight FastAPI + HTMX UI to search, browse, preview metadata, and perform safe bulk file operations.
 
-## Key Features (Concise)
+## Highlights
 - Incremental indexing (hash + size + times + dimensions + parsed metadata)
 - Optional FTS5 accelerated search (falls back to LIKE)
 - Multi-term search builder (AND / OR / NOT, LEN operators, empty `{}`)
@@ -56,7 +55,7 @@ Open http://127.0.0.1:8000
 - Operations stream in batches; progress endpoint: `/file_operation_status/{job_id}`.
 - Copy inserts new DB rows immediately (no re-index needed).
 
-## Project Structure (Top-Level)
+## Project Structure
 ```
 sd_index_manager.py    # CLI: init, index, launch web UI
 webui/                 # FastAPI app, templates, static assets
@@ -74,7 +73,7 @@ README.md
 - DB auto-migrates new columns; FTS5 triggers maintain search index.
 - Integrity check + self-repair attempt before indexing.
 
-## Configuration Touchpoints
+## Configuration
 - Allowed file-operation roots: `ALLOWED_ROOTS` in `webui/main.py`.
 - Page size limit: `MAX_PAGE_SIZE` in `webui/main.py`.
 - Batch sizes / job behavior: constants near file op code.
@@ -91,4 +90,4 @@ See `requirements.txt` (FastAPI, Pillow, sd-parsers, etc.). Ensure your Python h
 Add your preferred license text here.
 
 ---
-Concise by design: for a visual component overview see `PROJECT_STRUCTURE.md`.
+See `PROJECT_STRUCTURE.md` for a focused component diagram.
