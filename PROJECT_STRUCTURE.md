@@ -1,32 +1,23 @@
 # Project Architecture
 
 ```mermaid
-flowchart LR
-    subgraph IDX[Indexing CLI]
-        I1[sd_index_manager.py]
-    end
-    subgraph DATA[SQLite]
-        TBL[(files table)]
-        FTS[(files_fts)]
-    end
-    subgraph APP[FastAPI]
-        R[Routes/Search]
-        J[Async Jobs]
-    end
-    subgraph FRONTEND[Browser]
-        HTMX[HTMX]
-        TPL[Jinja2]
-        CSS[CSS]
+graph TD
+    subgraph Backend [Backend: FastAPI, Python]
+        A[FastAPI App]
+        B[SQLite Database]
+        A -->|Reads/Writes| B
     end
 
-    I1 --> TBL
-    TBL --> FTS
-    R --> TBL
-    J --> TBL
-    HTMX --> R
-    R --> TPL --> HTMX
-    TPL --> CSS
-    J -. status .-> HTMX
+    subgraph Frontend [Frontend: HTMX, Jinja2, CSS]
+        C[HTMX Interactions]
+        D[Jinja2 Templates]
+        E[CSS Styles]
+        D -->|Uses| E
+        C -->|Triggers| D
+    end
+
+    A -->|Serves| D
+    D -->|Displays| C
 ```
 
 The indexer populates and updates the primary `files` table; FTS triggers maintain the `files_fts` virtual table when supported. The web app provides search, pagination, semantic select-all, and asynchronous bulk operations (move / copy / delete) with progress polling.

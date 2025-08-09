@@ -5,33 +5,23 @@ Fast, file‑system based image metadata index + minimal web gallery.
 ![Screenshot](screenshot.png)
 
 ```mermaid
-flowchart LR
-  subgraph CLI[Indexing CLI]
-    IDX[sd_index_manager.py]
-  end
-  subgraph STORE[SQLite]
-    TBL[(files table)]
-    FTS[(files_fts)]
-  end
-  subgraph API[FastAPI App]
-    ROUTES[Routes / Search]
-    JOBS[Async Jobs (Bulk Ops)]
-  end
-  subgraph UI[Browser]
-    HTMX[HTMX + JS]
-    TPL[Jinja2 Templates]
-    CSS[CSS]
+graph TD
+  subgraph Backend [Backend: FastAPI, Python]
+    A[FastAPI App]
+    B[SQLite Database]
+    A -->|Reads/Writes| B
   end
 
-  IDX -->|insert/update| TBL
-  TBL --> FTS
-  ROUTES --> TBL
-  JOBS --> TBL
-  HTMX --> ROUTES
-  ROUTES --> TPL --> HTMX
-  TPL --> CSS
-  JOBS -. status .-> HTMX
-  TBL --> ROUTES
+  subgraph Frontend [Frontend: HTMX, Jinja2, CSS]
+    C[HTMX Interactions]
+    D[Jinja2 Templates]
+    E[CSS Styles]
+    D -->|Uses| E
+    C -->|Triggers| D
+  end
+
+  A -->|Serves| D
+  D -->|Displays| C
 ```
 
 ## What It Does
