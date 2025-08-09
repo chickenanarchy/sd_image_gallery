@@ -4,8 +4,38 @@ Fast, file‑system based image metadata index + minimal web gallery.
 
 ![Screenshot](screenshot.png)
 
+```mermaid
+%%{init: {'theme':'neutral','flowchart':{'curve':'basis'}} }%%
+flowchart LR
+  subgraph CLI[Indexing CLI]
+    IDX[sd_index_manager.py]\nScan & Parse
+  end
+  subgraph DB[(SQLite + FTS5?)]
+    TBL[(files table)]
+    FTS[(files_fts)]
+  end
+  subgraph API[FastAPI App]
+    ROUTES[Routes / Search]
+    JOBS[Async Jobs\n(Bulk Ops)]
+  end
+  subgraph UI[Browser]
+    HTMX[HTMX + JS]
+    TPL[Jinja2 Templates]
+    CSS[CSS]
+  end
+
+  IDX -->|insert / update| DB
+  ROUTES --> DB
+  JOBS --> DB
+  HTMX --> ROUTES
+  ROUTES --> TPL --> HTMX
+  TPL --> CSS
+  JOBS -. status polling .-> HTMX
+  DB --> ROUTES
+```
+
 ## What It Does
-Index common image formats into a single SQLite database (with optional FTS5) and provide a lightweight FastAPI + HTMX UI to search, browse, preview metadata, and perform safe bulk file operations.
+Indexes common image formats into a single SQLite database (with optional FTS5) and serves a lightweight FastAPI + HTMX UI to search, browse, preview metadata, and perform safe bulk file operations.
 
 ## Key Features (Concise)
 - Incremental indexing (hash + size + times + dimensions + parsed metadata)
