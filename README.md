@@ -38,7 +38,7 @@ Indexes common image formats into a single SQLite database (with optional FTS5) 
 
 ## Quick Start
 ```bash
-python sd_index_manager.py   # choose option 1 to index, option 3 to launch UI
+python sd_index_manager.py   # option 1: Index, option 2: Check/repair DB, option 4: Web UI
 # or directly
 uvicorn webui.main:app --reload
 ```
@@ -54,6 +54,12 @@ Open http://127.0.0.1:8000
 - Global select-all applies to the entire current query, not just the visible page.
 - Operations stream in batches; progress endpoint: `/file_operation_status/{job_id}`.
 - Copy inserts new DB rows immediately (no re-index needed).
+
+## De-duplicate by hash (CLI)
+- From `python sd_index_manager.py`, choose option 4: "De-duplicate files by hash (delete duplicates)".
+- This finds exact byte-identical duplicates via stored SHA-256 (`file_hash`).
+- It keeps one file per hash group and deletes the rest from disk and from the database.
+- There is a confirmation prompt; operation is destructive.
 
 ## Project Structure
 ```
@@ -72,6 +78,7 @@ README.md
 - Re-run the indexer to pick up new or modified files; unchanged entries are skipped.
 - DB auto-migrates new columns; FTS5 triggers maintain search index.
 - Integrity check + self-repair attempt before indexing.
+ - You can run a manual integrity check and repair anytime via menu option 2.
 
 ## Configuration
 - Allowed file-operation roots: `ALLOWED_ROOTS` in `webui/main.py`.

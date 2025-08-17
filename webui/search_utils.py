@@ -5,9 +5,10 @@ is consistent across endpoints. Supports optional FTS5 usage and special
 syntaxes:
     - LEN<op><number> : compares LENGTH(metadata_json)
     - {}              : metadata_json = '{}'
-If FTS is enabled (files_fts virtual table present) then basic terms are
-wrapped in quotes for phrase search unless they already look like an
-advanced FTS expression (boolean ops, parentheses, NEAR, wildcard, quotes).
+If FTS is enabled (files_fts virtual table present) then queries search across
+metadata_json and file path columns (path, path_norm). Basic terms are wrapped
+in quotes for phrase search unless they already look like an advanced FTS
+expression (boolean ops, parentheses, NEAR, wildcard, quotes).
 
 NOTE: The UI currently presents operator choices AND / OR / NOT where NOT
 is treated as a unary modifier logically equivalent to AND NOT <clause>.
@@ -44,9 +45,10 @@ def _build_single_clause(term: str, has_fts: bool) -> Tuple[str, List]:
     if has_fts:
         advanced = bool(BOOL_TOKEN_RE.search(term) or any(ch in term for ch in ['*', '"', '(', ')']))
         fts_query = term if advanced else f'"{term}"'
+        # files_fts MATCH searches across all FTS columns: metadata_json, path, path_norm
         return "rowid IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)", [fts_query]
-    # Fallback LIKE
-    return "metadata_json LIKE ?", [f"%{term}%"]
+    # Fallback LIKE across metadata and file_path
+    return "(metadata_json LIKE ? OR file_path LIKE ?)", [f"%{term}%", f"%{term}%"]
 
 def build_where(search: str, logics: Sequence[str], values: Sequence[str], has_fts: bool) -> Tuple[str, List]:
     """Return (where_sql, params) WITHOUT the leading 'WHERE'.

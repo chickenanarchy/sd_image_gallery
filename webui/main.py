@@ -3,14 +3,18 @@ import sqlite3
 import time
 import threading
 import uuid
+import datetime as _dt
+import calendar as _cal
 from typing import List, Optional, Sequence, Tuple, Dict, Any
 
 from fastapi import FastAPI, Request, Query, HTTPException, Body
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import re
 from .search_utils import build_where, SearchBuildError
+from io import BytesIO
+from PIL import Image
 
 app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -18,10 +22,34 @@ DB_PATH = os.path.join(os.path.dirname(BASE_DIR), "sd_index.db")
 MAX_PAGE_SIZE = 200
 
 # Optional configured allowed roots for file operations (restrict destructive ops)
-ALLOWED_ROOTS: Sequence[str] = [os.path.abspath(os.path.join(os.path.dirname(BASE_DIR)))]  # project root by default
+def _canonical_path(p: str) -> str:
+    """Return a canonical form of a path for comparisons (normcase + abspath)."""
+    return os.path.normcase(os.path.abspath(p))
+
+_env_roots = os.getenv("SD_ALLOWED_ROOTS", "").strip()
+if _env_roots:
+    # Environment variable takes precedence; split on os.pathsep
+    _parsed = [r for r in (s.strip() for s in _env_roots.split(os.pathsep)) if r]
+    ALLOWED_ROOTS: Optional[Sequence[str]] = [_canonical_path(r) for r in _parsed]
+else:
+    # None means unrestricted (any file in DB is eligible) to avoid silent skips when indexing arbitrary roots
+    ALLOWED_ROOTS = None
 
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """Serve a favicon to avoid noisy 404s in logs.
+
+    Uses the existing placeholder image; modern browsers accept PNG at /favicon.ico.
+    """
+    fav_path = os.path.join(BASE_DIR, "static", "placeholder.png")
+    if os.path.exists(fav_path):
+        # Cache for a week
+        headers = {"Cache-Control": "public, max-age=604800"}
+        return FileResponse(fav_path, media_type="image/png", headers=headers)
+    return Response(status_code=204)
 
 def get_db_connection():
     """Return a new sqlite3 connection tuned for read speed.
@@ -35,18 +63,30 @@ def get_db_connection():
         # Hints that can help large page navigation (best-effort)
         conn.execute("PRAGMA cache_size = -80000")  # ~80MB page cache (negative => KB)
         conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA mmap_size = 300000000")
     except sqlite3.Error:
         pass
     return conn
 
 def ensure_fts_flag():
-    """Cache presence of FTS5 virtual table once per process."""
+    """Cache presence of suitable FTS5 table once per process.
+
+    We only enable FTS if files_fts exists AND includes path columns (path, path_norm).
+    Otherwise we fall back to LIKE search so path queries still work without migration.
+    """
     if not hasattr(app.state, 'has_fts'):
         try:
             with get_db_connection() as conn:
                 cur = conn.cursor()
-                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='files_fts'")
-                app.state.has_fts = cur.fetchone() is not None
+                cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='files_fts'")
+                row = cur.fetchone()
+                if not row:
+                    app.state.has_fts = False
+                else:
+                    ddl = row[0] if isinstance(row[0], str) else ''
+                    # naive check for columns; safer alternative is PRAGMA table_info on contentless FTS
+                    has_paths = ('path' in ddl and 'path_norm' in ddl)
+                    app.state.has_fts = bool(has_paths)
         except sqlite3.Error:
             app.state.has_fts = False
     return app.state.has_fts
@@ -92,11 +132,16 @@ def _cached_total(where_sql: str, params: List[Any]) -> int:
     return total
 
 def _validate_allowed(path: str) -> bool:
-    p = os.path.abspath(path)
+    if not ALLOWED_ROOTS:  # None or empty => unrestricted
+        return True
+    p = _canonical_path(path)
     for root in ALLOWED_ROOTS:
         if p == root or p.startswith(root + os.sep):
             return True
     return False
+
+def _is_under_allowed(path: str) -> bool:
+    return _validate_allowed(path)
 
 def _safe_collision_path(dest_dir: str, filename: str) -> str:
     target = os.path.join(dest_dir, filename)
@@ -109,6 +154,46 @@ def _safe_collision_path(dest_dir: str, filename: str) -> str:
         counter += 1
     return target
 
+def _apply_time_filter(where_sql: str, params: List[Any], sort: str, year: str, month: str) -> Tuple[str, List[Any], str, str]:
+    """Given current WHERE SQL & params, append a time range filter based on sort/year/month.
+
+    Returns updated (where_sql, params, normalized_year, normalized_month).
+    Time filtering only applies when sorting by file_mtime/file_ctime and a year is provided.
+    Normalization: blank or 'ALL' -> ''
+    """
+    time_sort_columns = {"file_mtime": "file_mtime", "file_ctime": "file_ctime"}
+    time_col = time_sort_columns.get(sort)
+    year_norm = (year or '').strip()
+    if year_norm.upper() == 'ALL':
+        year_norm = ''
+    month_norm = (month or '').strip()
+    if month_norm.upper() == 'ALL':
+        month_norm = ''
+    if time_col and year_norm:
+        try:
+            y_int = int(year_norm)
+            if month_norm:
+                m_int = int(month_norm)
+                if not 1 <= m_int <= 12:
+                    raise ValueError("Month out of range")
+                start_dt = _dt.datetime(y_int, m_int, 1, 0, 0, 0)
+                end_dt = _dt.datetime(y_int + (1 if m_int == 12 else 0), (1 if m_int == 12 else m_int + 1), 1, 0, 0, 0)
+            else:
+                start_dt = _dt.datetime(y_int, 1, 1, 0, 0, 0)
+                end_dt = _dt.datetime(y_int + 1, 1, 1, 0, 0, 0)
+            start_epoch = int(start_dt.timestamp())
+            end_epoch = int(end_dt.timestamp())
+            range_clause = f"{time_col} >= ? AND {time_col} < ?"
+            if where_sql:
+                where_sql = f"({where_sql}) AND {range_clause}"
+            else:
+                where_sql = range_clause
+            params = params + [start_epoch, end_epoch]
+        except ValueError:
+            # Silently ignore malformed year/month
+            pass
+    return where_sql, params, year_norm, month_norm
+
 @app.get("/", response_class=HTMLResponse)
 def gallery(
     request: Request,
@@ -117,6 +202,10 @@ def gallery(
     values: Optional[List[str]] = Query(default=[]),
     page: int = 1,
     page_size: int = 100,
+    sort: str = Query(default="last_scanned"),
+    order: str = Query(default="desc"),
+    year: str = Query(default=""),  # YYYY or ''/ALL
+    month: str = Query(default=""), # MM or ''/ALL
 ) -> HTMLResponse:
     if page < 1:
         page = 1
@@ -130,16 +219,39 @@ def gallery(
     except SearchBuildError as e:
         raise HTTPException(status_code=400, detail=str(e))
     offset = (page - 1) * page_size
+    # Sort validation & mapping (whitelist to prevent injection)
+    sort_map = {
+        "last_scanned": "last_scanned",
+        "file_name": "file_path",
+        "file_size": "file_size",
+        "file_mtime": "file_mtime",
+        "file_ctime": "file_ctime",
+        "width": "width",
+        "height": "height",
+        "id": "id",
+    }
+    sort_key = sort_map.get(sort, "last_scanned")
+    order_dir = "ASC" if str(order).lower() == "asc" else "DESC"
+    # For file_name we want case-insensitive ordering for consistency
+    if sort_key == "file_path":
+        primary_order = f"{sort_key} COLLATE NOCASE {order_dir}"
+    else:
+        primary_order = f"{sort_key} {order_dir}"
+    # Stable secondary order (id DESC or ASC to make pagination deterministic)
+    secondary_order = "id DESC" if order_dir == "DESC" else "id ASC"
+    order_clause = f"{primary_order}, {secondary_order}"
+    # Apply time filter (if any) using shared helper
+    where_sql, params, year_norm, month_norm = _apply_time_filter(where_sql, params, sort, year, month)
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             # Important performance change: only fetch columns required for gallery list.
             select_cols = "id, file_path, file_hash, last_scanned"
             if where_sql:
-                query = f"SELECT {select_cols} FROM files WHERE {where_sql} ORDER BY last_scanned DESC, id DESC LIMIT ? OFFSET ?"
+                query = f"SELECT {select_cols} FROM files WHERE {where_sql} ORDER BY {order_clause} LIMIT ? OFFSET ?"
                 cursor.execute(query, params + [page_size, offset])
             else:
-                cursor.execute(f"SELECT {select_cols} FROM files ORDER BY last_scanned DESC, id DESC LIMIT ? OFFSET ?", (page_size, offset))
+                cursor.execute(f"SELECT {select_cols} FROM files ORDER BY {order_clause} LIMIT ? OFFSET ?", (page_size, offset))
             files = cursor.fetchall()
             # Use (short-lived) cached total
             total = _cached_total(where_sql, params)
@@ -153,6 +265,10 @@ def gallery(
                 "logics": logics if logics else [],
                 "fields": values if values else [],
                 "values": values if values else [],
+                "sort": sort,
+                "order": order.lower(),
+                "year": year_norm,
+                "month": month_norm,
                 "error": "Database error occurred.",
                 "page": page,
                 "page_size": page_size,
@@ -172,9 +288,41 @@ def gallery(
             "page": page,
             "page_size": page_size,
             "total": total,
+            "sort": sort,
+            "order": order.lower(),
+            "year": year_norm,
+            "month": month_norm,
             "error": None,
         },
     )
+
+@app.get("/time_facets")
+def time_facets(column: str, year: Optional[str] = None):
+    """Return distinct years (and months for a selected year) for a time column.
+
+    column must be one of file_mtime | file_ctime. Returns JSON {years:[..], months:[..]}
+    Months only returned (non-empty) if a specific year (not ALL/blank) is provided.
+    """
+    col_map = {"file_mtime": "file_mtime", "file_ctime": "file_ctime"}
+    col = col_map.get(column)
+    if not col:
+        raise HTTPException(status_code=400, detail="Invalid column")
+    years: List[str] = []
+    months: List[str] = []
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(f"SELECT DISTINCT strftime('%Y', datetime({col}, 'unixepoch')) AS y FROM files WHERE {col} IS NOT NULL ORDER BY y DESC")
+            years = [r[0] for r in cur.fetchall() if r[0]]
+            if year and year.upper() != 'ALL':
+                cur.execute(
+                    f"SELECT DISTINCT strftime('%m', datetime({col}, 'unixepoch')) AS m FROM files WHERE {col} IS NOT NULL AND strftime('%Y', datetime({col}, 'unixepoch'))=? ORDER BY m ASC",
+                    (year,)
+                )
+                months = [r[0] for r in cur.fetchall() if r[0]]
+    except sqlite3.Error:
+        pass
+    return {"years": years, "months": months}
 
 @app.get("/metadata/{file_id}")
 def get_metadata(file_id: int):
@@ -213,6 +361,38 @@ def get_image(file_id: int, request: Request) -> FileResponse:
     else:
         headers = {"Cache-Control": "no-cache"}
     return FileResponse(file_path, headers=headers)
+
+@app.get("/thumb/{file_id}")
+def get_thumbnail(file_id: int, request: Request, h: int = Query(default=256, ge=32, le=1024)):
+    """Return a downscaled JPEG thumbnail to speed up gallery loading.
+
+    Height parameter controls size; width preserves aspect ratio. Cached for a year when hash provided.
+    """
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT file_path, file_hash FROM files WHERE id=?", (file_id,))
+            row = cur.fetchone()
+    except sqlite3.Error:
+        raise HTTPException(status_code=500, detail="Database error")
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Image not found")
+    fp = row["file_path"]
+    if not os.path.isfile(fp):
+        raise HTTPException(status_code=404, detail="File not found on disk")
+    # Best-effort thumbnailing
+    try:
+        with Image.open(fp) as im:
+            im.thumbnail((h * 2, h), Image.Resampling.LANCZOS)  # slight width bump to keep details
+            buf = BytesIO()
+            im.convert("RGB").save(buf, format="JPEG", quality=82, optimize=True)
+            buf.seek(0)
+        headers = {"Cache-Control": "public, max-age=31536000, immutable"} if row["file_hash"] else {"Cache-Control": "no-cache"}
+        return Response(content=buf.getvalue(), media_type="image/jpeg", headers=headers)
+    except Exception:
+        # Fallback to original delivery
+        return get_image(file_id, request)
 
 import shutil
 
@@ -299,8 +479,8 @@ def file_operation(
     if operation in {"move", "copy"}:
         if not destination or not os.path.isdir(destination):
             raise HTTPException(status_code=400, detail="Invalid destination folder")
-        dest_abs = os.path.abspath(destination)
-        if not any(dest_abs == r or dest_abs.startswith(r + os.sep) for r in ALLOWED_ROOTS):
+        dest_abs = _canonical_path(destination)
+        if not _is_under_allowed(dest_abs):
             raise HTTPException(status_code=400, detail="Destination outside allowed roots")
 
     # Stats & error collection
@@ -330,8 +510,8 @@ def file_operation(
                 for row in rows:
                     try:
                         src = row["file_path"]
-                        src_abs = os.path.abspath(src)
-                        if not any(src_abs == r or src_abs.startswith(r + os.sep) for r in ALLOWED_ROOTS):
+                        src_abs = _canonical_path(src)
+                        if not _is_under_allowed(src_abs):
                             errors.append(f"Outside allowed root: {src}")
                             continue
                         if operation in {"move", "copy"}:
@@ -407,12 +587,17 @@ def matching_count(
     search: str = "",
     logics: Optional[List[str]] = Query(default=[]),
     values: Optional[List[str]] = Query(default=[]),
+    sort: str = Query(default="last_scanned"),
+    year: str = Query(default=""),
+    month: str = Query(default=""),
 ):
     has_fts = ensure_fts_flag()
     try:
         where_sql, params = build_where(search, logics or [], values or [], has_fts)
     except SearchBuildError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # Apply time filter consistency with gallery
+    where_sql, params, _, _ = _apply_time_filter(where_sql, params, sort, year, month)
     total = _cached_total(where_sql, params)
     return {"total": total}
 
@@ -430,7 +615,7 @@ def start_file_operation_async(
     if operation in {"move", "copy"}:
         if not destination or not os.path.isdir(destination):
             raise HTTPException(status_code=400, detail="Invalid destination folder")
-        dest_abs = os.path.abspath(destination)
+        dest_abs = _canonical_path(destination)
         if not _validate_allowed(dest_abs):
             raise HTTPException(status_code=400, detail="Destination outside allowed roots")
 
@@ -461,15 +646,23 @@ def start_file_operation_async(
                     raise ValueError("Scope ids must be list[int]")
                 _process_ids_sync(ids, operation, dest_abs, job, async_mode=True)
             else:
-                # Query scope
+                # Query scope (optionally with exclusions)
                 search = scope.get('search', '')
                 logics = scope.get('logics', []) or []
                 values = scope.get('values', []) or []
+                sort = scope.get('sort', 'last_scanned') or 'last_scanned'
+                year = scope.get('year', '') or ''
+                month = scope.get('month', '') or ''
+                exclusions = scope.get('excluded', []) or []
+                if exclusions and not all(isinstance(x, int) for x in exclusions):
+                    raise ValueError("Excluded must be list[int]")
                 has_fts = ensure_fts_flag()
                 where_sql, params = build_where(search, logics, values, has_fts)
-                # Determine total upfront
-                job['total'] = _cached_total(where_sql, params)
-                _process_query_scope(where_sql, params, operation, dest_abs, job)
+                where_sql, params, _, _ = _apply_time_filter(where_sql, params, sort, year, month)
+                # Determine total upfront (minus exclusions that may exist in result set)
+                total_raw = _cached_total(where_sql, params)
+                job['total'] = max(0, total_raw - len(exclusions))
+                _process_query_scope(where_sql, params, operation, dest_abs, job, exclusions)
             job['status'] = 'completed'
         except Exception as e:
             job['status'] = 'failed'
@@ -504,10 +697,12 @@ def _process_ids_sync(ids: List[int], operation: str, dest_abs: Optional[str], j
     except Exception as e:
         raise e
 
-def _process_query_scope(where_sql: str, params: List[Any], operation: str, dest_abs: Optional[str], job: Dict[str, Any]):
+def _process_query_scope(where_sql: str, params: List[Any], operation: str, dest_abs: Optional[str], job: Dict[str, Any], exclusions: Optional[Sequence[int]] = None):
     BATCH = 500
     last_id = 0
     total = job.get('total') or 0
+    exclusion_set = set(exclusions or [])
+    debug_logged = False
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
@@ -521,7 +716,22 @@ def _process_query_scope(where_sql: str, params: List[Any], operation: str, dest
                 rows = cur.fetchall()
                 if not rows:
                     break
-                _process_rows(rows, operation, dest_abs, conn, job)
+                # Filter rows against exclusions before processing to keep processed count aligned with job['total']
+                if exclusion_set:
+                    rows_to_process = [r for r in rows if r['id'] not in exclusion_set]
+                else:
+                    rows_to_process = rows
+                if rows_to_process:
+                    if not debug_logged:
+                        try:
+                            sample = rows_to_process[:3]
+                            print(f"[DEBUG file_operation] First batch sample (operation={operation} total_est={total}):")
+                            for r in sample:
+                                print("  id=", r['id'], "path=", r['file_path'])
+                        except Exception:
+                            pass
+                        debug_logged = True
+                    _process_rows(rows_to_process, operation, dest_abs, conn, job)
                 last_id = rows[-1]['id']
                 job['updated'] = time.time()
     except Exception as e:
