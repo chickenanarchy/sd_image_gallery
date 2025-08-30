@@ -18,7 +18,8 @@ support full precedence & grouping.)
 from __future__ import annotations
 
 from typing import List, Tuple, Sequence
-import re
+import re, sqlite3
+from sd_index.paths import DB_PATH
 
 LEN_PATTERN = re.compile(r"^LEN\s*([<>]=?|==?)\s*(\d+)\s*$", re.IGNORECASE)
 BOOL_TOKEN_RE = re.compile(r"\b(AND|OR|NOT|NEAR/\d+)\b", re.IGNORECASE)
@@ -27,6 +28,21 @@ ALLOWED_LOGICS = {"AND", "OR", "NOT"}
 
 class SearchBuildError(ValueError):
     pass
+
+_PROMPTS_FTS = None
+
+def _prompts_fts_exists() -> bool:
+    global _PROMPTS_FTS
+    if _PROMPTS_FTS is not None:
+        return _PROMPTS_FTS
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='prompts_fts'")
+            _PROMPTS_FTS = cur.fetchone() is not None
+    except Exception:
+        _PROMPTS_FTS = False
+    return _PROMPTS_FTS
 
 def _build_single_clause(term: str, has_fts: bool) -> Tuple[str, List]:
     term = term.strip()
@@ -45,8 +61,12 @@ def _build_single_clause(term: str, has_fts: bool) -> Tuple[str, List]:
     if has_fts:
         advanced = bool(BOOL_TOKEN_RE.search(term) or any(ch in term for ch in ['*', '"', '(', ')']))
         fts_query = term if advanced else f'"{term}"'
-        # files_fts MATCH searches across all FTS columns: metadata_json, path, path_norm
-        return "rowid IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)", [fts_query]
+        if _prompts_fts_exists():
+            return (
+                "id IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ? UNION SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?)",
+                [fts_query, fts_query]
+            )
+        return ("id IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)", [fts_query])
     # Fallback LIKE across metadata and file_path
     return "(metadata_json LIKE ? OR file_path LIKE ?)", [f"%{term}%", f"%{term}%"]
 

@@ -16,3 +16,17 @@ test/
 
 # Pytest cache
 .pytest_cache/
+
+# Coverage reports
+.coverage
+coverage.xml
+htmlcov/
+
+# Local ad-hoc debug helper scripts (consolidated into integration tests)
+_debug_*.py
+_integrity_check.py
+_migrate_fts.py
+
+# Performance and runtime logs
+test_integration/last_run_output.txt
+test_integration/perf_log.txt

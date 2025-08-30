@@ -4,3 +4,5 @@ jinja2
 sd-parsers
 alive-progress
 pillow
+pytest
+pytest-cov

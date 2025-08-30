@@ -5,6 +5,7 @@ import threading
 import uuid
 import datetime as _dt
 import calendar as _cal
+from datetime import datetime, timezone
 from typing import List, Optional, Sequence, Tuple, Dict, Any
 
 from fastapi import FastAPI, Request, Query, HTTPException, Body
@@ -18,8 +19,15 @@ from PIL import Image
 
 app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(os.path.dirname(BASE_DIR), "sd_index.db")
+
+# Reuse core DB path (supports SD_DB_PATH env override). Fallback to legacy location if import fails.
+try:
+    from sd_index import DB_PATH as CORE_DB_PATH  # type: ignore
+    DB_PATH = CORE_DB_PATH
+except Exception:  # pragma: no cover - fallback safety
+    DB_PATH = os.path.join(os.path.dirname(BASE_DIR), "sd_index.db")
 MAX_PAGE_SIZE = 200
+PLACEHOLDER_ON_MISSING = os.getenv("SD_THUMB_PLACEHOLDER_ON_MISSING", "1") == "1"
 
 # Optional configured allowed roots for file operations (restrict destructive ops)
 def _canonical_path(p: str) -> str:
@@ -28,12 +36,16 @@ def _canonical_path(p: str) -> str:
 
 _env_roots = os.getenv("SD_ALLOWED_ROOTS", "").strip()
 if _env_roots:
-    # Environment variable takes precedence; split on os.pathsep
     _parsed = [r for r in (s.strip() for s in _env_roots.split(os.pathsep)) if r]
     ALLOWED_ROOTS: Optional[Sequence[str]] = [_canonical_path(r) for r in _parsed]
 else:
-    # None means unrestricted (any file in DB is eligible) to avoid silent skips when indexing arbitrary roots
-    ALLOWED_ROOTS = None
+    # If user explicitly requires allowed roots, enforce disabling destructive ops unless configured
+    if os.getenv("SD_REQUIRE_ALLOWED_ROOTS", "0") == "1":
+        ALLOWED_ROOTS = []  # empty list => no path passes validation
+    else:
+        ALLOWED_ROOTS = None  # unrestricted (default local usage)
+
+DESTRUCTIVE_DISABLED = os.getenv("SD_DISABLE_DESTRUCTIVE_OPS", "0") == "1"
 
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
@@ -68,40 +80,71 @@ def get_db_connection():
         pass
     return conn
 
-def ensure_fts_flag():
-    """Cache presence of suitable FTS5 table once per process.
+def ensure_fts_flag(force_recheck: bool = False):
+    """Cache (with occasional refresh) presence of suitable FTS5 table.
 
-    We only enable FTS if files_fts exists AND includes path columns (path, path_norm).
-    Otherwise we fall back to LIKE search so path queries still work without migration.
+    If FTS was missing at startup but later created (after indexing in another
+    process) we eventually pick it up. A manual recheck can be forced by passing
+    force_recheck=True (used by /refresh_fts endpoint) or automatically every
+    REFRESH_INTERVAL seconds when previously false.
     """
-    if not hasattr(app.state, 'has_fts'):
-        try:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='files_fts'")
-                row = cur.fetchone()
-                if not row:
-                    app.state.has_fts = False
-                else:
-                    ddl = row[0] if isinstance(row[0], str) else ''
-                    # naive check for columns; safer alternative is PRAGMA table_info on contentless FTS
-                    has_paths = ('path' in ddl and 'path_norm' in ddl)
-                    app.state.has_fts = bool(has_paths)
-        except sqlite3.Error:
-            app.state.has_fts = False
-    return app.state.has_fts
+    REFRESH_INTERVAL = 60.0
+    now = time.time()
+    if force_recheck or not hasattr(app.state, 'has_fts') or not getattr(app.state, 'has_fts', False):
+        last = getattr(app.state, 'fts_checked_at', 0)
+        if force_recheck or (now - last) > REFRESH_INTERVAL:
+            try:
+                with get_db_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='files_fts'")
+                    row = cur.fetchone()
+                    if not row:
+                        app.state.has_fts = False
+                    else:
+                        ddl = row[0] if isinstance(row[0], str) else ''
+                        has_paths = ('path' in ddl and 'path_norm' in ddl)
+                        valid = bool(has_paths)
+                        if valid:
+                            # Additional integrity heuristic: if FTS docsize table has zero rows while files table has rows, treat FTS as unusable.
+                            try:
+                                cur.execute("SELECT COUNT(*) FROM files")
+                                total_files = cur.fetchone()[0]
+                                cur.execute("SELECT COUNT(*) FROM files_fts_docsize")
+                                fts_docs = cur.fetchone()[0]
+                                if total_files > 0 and fts_docs == 0:
+                                    # Flag unusable; caller will fall back to LIKE search.
+                                    valid = False
+                                    if not getattr(app.state, 'fts_empty_warned', False):
+                                        print("[WARN] Detected empty FTS index (0 docs) while files table has", total_files, "rows. Falling back to non-FTS search. Re-run indexing to rebuild FTS.")
+                                        app.state.fts_empty_warned = True  # type: ignore[attr-defined]
+                            except sqlite3.Error:
+                                # On any error assume invalid so we don't block searches.
+                                valid = False
+                        app.state.has_fts = valid
+            except sqlite3.Error:
+                app.state.has_fts = False
+            app.state.fts_checked_at = now
+    return getattr(app.state, 'has_fts', False)
 
 ensure_fts_flag()
 
 # Simple in-process count cache to avoid repeating COUNT(*) for rapid page flips.
 # Key: (where_sql, tuple(params)) -> (total, timestamp)
 COUNT_CACHE_TTL = 5.0  # seconds
+def _invalidate_count_cache():
+    try:
+        app.state.count_cache.clear()  # type: ignore[attr-defined]
+    except Exception:
+        pass
 MAX_COUNT_CACHE_ENTRIES = 128
 if not hasattr(app.state, 'count_cache'):
     # runtime attribute; keep simple to avoid Python <3.11 attribute annotation issues
     app.state.count_cache = {}  # type: ignore[attr-defined]
+import threading as _threading
 if not hasattr(app.state, 'jobs'):
     app.state.jobs = {}  # type: ignore[attr-defined]
+if not hasattr(app.state, 'jobs_lock'):
+    app.state.jobs_lock = _threading.Lock()  # type: ignore[attr-defined]
 
 def _cached_total(where_sql: str, params: List[Any]) -> int:
     """Return cached total row count for a WHERE clause if fresh; else compute & cache."""
@@ -176,11 +219,15 @@ def _apply_time_filter(where_sql: str, params: List[Any], sort: str, year: str, 
                 m_int = int(month_norm)
                 if not 1 <= m_int <= 12:
                     raise ValueError("Month out of range")
-                start_dt = _dt.datetime(y_int, m_int, 1, 0, 0, 0)
-                end_dt = _dt.datetime(y_int + (1 if m_int == 12 else 0), (1 if m_int == 12 else m_int + 1), 1, 0, 0, 0)
+                start_dt = datetime(y_int, m_int, 1, 0, 0, 0, tzinfo=timezone.utc)
+                # compute next month
+                if m_int == 12:
+                    end_dt = datetime(y_int + 1, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+                else:
+                    end_dt = datetime(y_int, m_int + 1, 1, 0, 0, 0, tzinfo=timezone.utc)
             else:
-                start_dt = _dt.datetime(y_int, 1, 1, 0, 0, 0)
-                end_dt = _dt.datetime(y_int + 1, 1, 1, 0, 0, 0)
+                start_dt = datetime(y_int, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+                end_dt = datetime(y_int + 1, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
             start_epoch = int(start_dt.timestamp())
             end_epoch = int(end_dt.timestamp())
             range_clause = f"{time_col} >= ? AND {time_col} < ?"
@@ -380,6 +427,16 @@ def get_thumbnail(file_id: int, request: Request, h: int = Query(default=256, ge
         raise HTTPException(status_code=404, detail="Image not found")
     fp = row["file_path"]
     if not os.path.isfile(fp):
+        # Serve placeholder (optional) instead of noisy 404s which spam logs & trigger many network errors
+        if PLACEHOLDER_ON_MISSING:
+            ph_png = os.path.join(BASE_DIR, "static", "placeholder.png")
+            ph_svg = os.path.join(BASE_DIR, "static", "placeholder.svg")
+            ph = ph_png if os.path.isfile(ph_png) else (ph_svg if os.path.isfile(ph_svg) else None)
+            if ph:
+                # Cache short if no hash; encourage browser reuse but allow recovery if file restored later
+                headers = {"Cache-Control": "public, max-age=3600"}
+                media_type = "image/png" if ph.endswith('.png') else "image/svg+xml"
+                return FileResponse(ph, media_type=media_type, headers=headers)
         raise HTTPException(status_code=404, detail="File not found on disk")
     # Best-effort thumbnailing
     try:
@@ -471,6 +528,8 @@ def file_operation(
     """
     if operation not in {"move", "copy", "delete"}:
         raise HTTPException(status_code=400, detail="Invalid operation")
+    if DESTRUCTIVE_DISABLED:
+        raise HTTPException(status_code=400, detail="Destructive operations disabled (SD_DISABLE_DESTRUCTIVE_OPS=1)")
     if not ids:
         raise HTTPException(status_code=400, detail="No ids supplied")
 
@@ -542,16 +601,18 @@ def file_operation(
                                     """,
                                     (
                                         target,
-                                        row.get("file_hash") if "file_hash" in row.keys() else None,
-                                        row.get("metadata_json") if "metadata_json" in row.keys() else None,
-                                        row.get("file_size") if "file_size" in row.keys() else None,
-                                        row.get("file_mtime") if "file_mtime" in row.keys() else None,
-                                        row.get("file_ctime") if "file_ctime" in row.keys() else None,
-                                        row.get("width") if "width" in row.keys() else None,
-                                        row.get("height") if "height" in row.keys() else None,
+                                        row['file_hash'] if 'file_hash' in row.keys() else None,
+                                        row['metadata_json'] if 'metadata_json' in row.keys() else None,
+                                        row['file_size'] if 'file_size' in row.keys() else None,
+                                        row['file_mtime'] if 'file_mtime' in row.keys() else None,
+                                        row['file_ctime'] if 'file_ctime' in row.keys() else None,
+                                        row['width'] if 'width' in row.keys() else None,
+                                        row['height'] if 'height' in row.keys() else None,
                                     ),
                                 )
-                                copied += 1
+                                # Only count as copied if DB insert actually succeeded
+                                if cur.rowcount > 0:
+                                    copied += 1
                         elif operation == 'delete':
                             if os.path.isfile(src):
                                 try:
@@ -570,8 +631,10 @@ def file_operation(
         raise HTTPException(status_code=500, detail=f"File operation failed: {e}")
 
     duration = time.time() - start_time
+    _invalidate_count_cache()
+    status = "success" if not errors else "partial"
     summary = {
-        "status": "success",
+        "status": status,
         "operation": operation,
         "counts": {"moved": moved, "copied": copied, "deleted": deleted},
         "errors": errors[:25],  # return only first 25 to limit payload
@@ -601,6 +664,32 @@ def matching_count(
     total = _cached_total(where_sql, params)
     return {"total": total}
 
+@app.get("/extraction_summary")
+def extraction_summary():
+    """Return aggregate extraction stats (counts + top LoRA)."""
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM files")
+            files = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM models")
+            models = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM models WHERE lora_count>0")
+            with_lora = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(DISTINCT lora_name) FROM lora_usages")
+            distinct_loras = cur.fetchone()[0]
+            cur.execute("SELECT lora_name, COUNT(*) c FROM lora_usages GROUP BY lora_name ORDER BY c DESC LIMIT 20")
+            top = [{'name': r[0], 'count': r[1]} for r in cur.fetchall()]
+            return {
+                'files': files,
+                'models': models,
+                'with_lora': with_lora,
+                'distinct_loras': distinct_loras,
+                'top_loras': top
+            }
+    except sqlite3.Error as e:
+        raise HTTPException(status_code=500, detail=f'Database error: {e}')
+
 @app.post("/file_operation_async")
 def start_file_operation_async(
     operation: str = Body(...),
@@ -609,6 +698,8 @@ def start_file_operation_async(
 ):
     if operation not in {"move", "copy", "delete"}:
         raise HTTPException(status_code=400, detail="Invalid operation")
+    if DESTRUCTIVE_DISABLED:
+        raise HTTPException(status_code=400, detail="Destructive operations disabled (SD_DISABLE_DESTRUCTIVE_OPS=1)")
     if scope.get('type') not in {"query", "ids"}:
         raise HTTPException(status_code=400, detail="Invalid scope type")
     dest_abs: Optional[str] = None
@@ -620,7 +711,8 @@ def start_file_operation_async(
             raise HTTPException(status_code=400, detail="Destination outside allowed roots")
 
     job_id = uuid.uuid4().hex
-    app.state.jobs[job_id] = {
+    with app.state.jobs_lock:  # type: ignore[attr-defined]
+        app.state.jobs[job_id] = {
         "id": job_id,
         "operation": operation,
         "status": "pending",
@@ -703,16 +795,34 @@ def _process_query_scope(where_sql: str, params: List[Any], operation: str, dest
     total = job.get('total') or 0
     exclusion_set = set(exclusions or [])
     debug_logged = False
+    # Capture the current maximum id BEFORE we start modifying the table (important for copy operations
+    # which insert new rows; we don't want to repeatedly process newly inserted copies).
+    try:
+        with get_db_connection() as _conn_max:
+            curm = _conn_max.cursor()
+            curm.execute("SELECT COALESCE(MAX(id),0) FROM files")
+            original_max_id = curm.fetchone()[0]
+    except sqlite3.Error:
+        original_max_id = None  # fallback: process until natural exhaustion (legacy behavior)
     try:
         with get_db_connection() as conn:
             cur = conn.cursor()
             while True:
                 # Build incremental query
+                max_id_clause = " AND id <= ?" if original_max_id is not None else ""
                 if where_sql:
-                    query = f"SELECT id, file_path, file_hash, metadata_json, file_size, file_mtime, file_ctime, width, height FROM files WHERE ({where_sql}) AND id > ? ORDER BY id LIMIT ?"
-                    cur.execute(query, params + [last_id, BATCH])
+                    query = f"SELECT id, file_path, file_hash, metadata_json, file_size, file_mtime, file_ctime, width, height FROM files WHERE ({where_sql}) AND id > ?{max_id_clause} ORDER BY id LIMIT ?"
+                    execute_params = params + [last_id]
+                    if original_max_id is not None:
+                        execute_params.append(original_max_id)
+                    execute_params.append(BATCH)
+                    cur.execute(query, execute_params)
                 else:
-                    cur.execute("SELECT id, file_path, file_hash, metadata_json, file_size, file_mtime, file_ctime, width, height FROM files WHERE id > ? ORDER BY id LIMIT ?", (last_id, BATCH))
+                    base = f"SELECT id, file_path, file_hash, metadata_json, file_size, file_mtime, file_ctime, width, height FROM files WHERE id > ?{max_id_clause} ORDER BY id LIMIT ?"
+                    if original_max_id is not None:
+                        cur.execute(base, (last_id, original_max_id, BATCH))
+                    else:
+                        cur.execute(base, (last_id, BATCH))
                 rows = cur.fetchall()
                 if not rows:
                     break
@@ -765,16 +875,18 @@ def _process_rows(rows: Sequence[sqlite3.Row], operation: str, dest_abs: Optiona
                         """,
                         (
                             target,
-                            row.get('file_hash'),
-                            row.get('metadata_json'),
-                            row.get('file_size'),
-                            row.get('file_mtime'),
-                            row.get('file_ctime'),
-                            row.get('width'),
-                            row.get('height'),
+                            row['file_hash'] if 'file_hash' in row.keys() else None,
+                            row['metadata_json'] if 'metadata_json' in row.keys() else None,
+                            row['file_size'] if 'file_size' in row.keys() else None,
+                            row['file_mtime'] if 'file_mtime' in row.keys() else None,
+                            row['file_ctime'] if 'file_ctime' in row.keys() else None,
+                            row['width'] if 'width' in row.keys() else None,
+                            row['height'] if 'height' in row.keys() else None,
                         ),
                     )
-                    job['counts']['copied'] += 1
+                    # Only count as copied if DB insert actually succeeded
+                    if cur.rowcount > 0:
+                        job['counts']['copied'] += 1
             elif operation == 'delete':
                 if os.path.isfile(src):
                     try:
@@ -792,14 +904,22 @@ def _process_rows(rows: Sequence[sqlite3.Row], operation: str, dest_abs: Optiona
             # Trim retained errors to first 50
             job['errors'] = job['errors'][:50]
     conn.commit()
+    _invalidate_count_cache()
 
 @app.get("/file_operation_status/{job_id}")
 def file_operation_status(job_id: str):
-    job = app.state.jobs.get(job_id)
+    with app.state.jobs_lock:  # type: ignore[attr-defined]
+        job = app.state.jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     # Shallow copy without scope internals that may be large
     payload = {k: v for k, v in job.items() if k != 'scope'}
     payload['scope_type'] = job.get('scope', {}).get('type')
     return payload
+
+@app.post("/refresh_fts")
+def refresh_fts():
+    """Force a re-check of FTS availability (useful after external migration)."""
+    has_fts = ensure_fts_flag(force_recheck=True)
+    return {"has_fts": has_fts}
 
